@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+
+workspace/
+*.log
+
+# VASP large files
+WAVECAR
+CHGCAR
+CHG
+DOSCAR
+PROCAR
+OUTCAR
+OSZICAR
+vasprun.xml
+XDATCAR
+POTCAR
+
+# local secrets/config
+.env
+config/local.json
