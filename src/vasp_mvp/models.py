@@ -11,6 +11,32 @@ TaskStatus = Literal["draft", "committed", "running", "finished", "failed", "sto
 InputSetSource = Literal["vaspkit", "manual", "imported"]
 InputSetStatus = Literal["dry_run", "generated", "edited", "validated", "committed", "invalid"]
 InputSetRole = Literal["primary", "adsorbed", "clean_slab", "molecule_ref"]
+CalculationType = Literal[
+    "relax",
+    "static",
+    "molecule_relax",
+    "molecule_static",
+    "slab_static",
+    "adsorbed_static",
+    "dos",
+    "bader",
+    "neb",
+    "unknown",
+]
+JobStatus = Literal["draft", "committed", "running", "finished", "failed", "stopped"]
+WorkflowType = Literal["adsorption", "neb", "dos", "bader", "custom"]
+WorkflowStatus = Literal["draft", "committed", "running", "finished", "failed", "stopped"]
+WorkflowRole = Literal[
+    "clean_slab",
+    "molecule_ref",
+    "adsorbed_system",
+    "initial_state",
+    "final_state",
+    "neb_image",
+    "dos",
+    "bader",
+    "primary",
+]
 
 
 @dataclass(frozen=True)
@@ -115,3 +141,62 @@ class TaskInputSet:
     role: InputSetRole
     input_set_id: str
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class JobRecord:
+    job_id: str
+    calculation_type: CalculationType
+    status: JobStatus
+    run_dir: Path
+    input_set_id: str | None
+    pid: int | None
+    created_at: datetime
+    updated_at: datetime
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    return_code: int | None = None
+    mpi_ranks: int | None = None
+    vasp_bin: str | None = None
+
+
+@dataclass(frozen=True)
+class JobMetricsRecord:
+    job_id: str
+    toten_ev: float | None
+    loop_avg_seconds: float | None
+    loop_count: int
+    ionic_converged: bool | None
+    electronic_converged: bool | None
+    oszicar_steps: tuple[float, ...]
+    errors: tuple[str, ...]
+    energy_source: str
+    energy_label: str
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class WorkflowRecord:
+    workflow_id: str
+    workflow_type: WorkflowType
+    name: str
+    status: WorkflowStatus
+    root_dir: Path
+    method_family: str | None
+    functional: str | None
+    method_notes: str | None
+    created_at: datetime
+    updated_at: datetime
+    notes: str = ""
+
+
+@dataclass(frozen=True)
+class WorkflowJobRecord:
+    workflow_job_id: str
+    workflow_id: str
+    job_id: str
+    role: WorkflowRole
+    step_order: int | None
+    required: bool
+    created_at: datetime
+    notes: str = ""

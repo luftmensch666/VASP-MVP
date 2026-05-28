@@ -66,6 +66,77 @@ CREATE TABLE IF NOT EXISTS task_input_sets (
 );
 """
 
+JOBS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id TEXT PRIMARY KEY,
+    calculation_type TEXT,
+    status TEXT NOT NULL,
+    run_dir TEXT NOT NULL,
+    input_set_id TEXT,
+    pid INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    start_time TEXT,
+    end_time TEXT,
+    return_code INTEGER,
+    mpi_ranks INTEGER,
+    vasp_bin TEXT
+);
+"""
+
+JOB_METRICS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS job_metrics (
+    job_id TEXT PRIMARY KEY,
+    toten REAL,
+    loop_avg REAL,
+    loop_count INTEGER,
+    ionic_converged INTEGER,
+    electronic_converged INTEGER,
+    oszicar_steps_json TEXT,
+    errors_json TEXT,
+    energy_source TEXT DEFAULT 'OUTCAR',
+    energy_label TEXT DEFAULT 'final TOTEN',
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+);
+"""
+
+WORKFLOWS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS workflows (
+    workflow_id TEXT PRIMARY KEY,
+    workflow_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    root_dir TEXT NOT NULL,
+    method_family TEXT,
+    functional TEXT,
+    method_notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    notes TEXT
+);
+"""
+
+WORKFLOW_JOBS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS workflow_jobs (
+    workflow_job_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    step_order INTEGER,
+    required INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL,
+    notes TEXT,
+    FOREIGN KEY(workflow_id) REFERENCES workflows(workflow_id),
+    FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+);
+"""
+
+WORKFLOW_JOBS_UNIQUE_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_jobs_unique_binding
+ON workflow_jobs (workflow_id, job_id, role);
+"""
+
 
 def db_path(workspace: Path) -> Path:
     workspace = Path(workspace)
@@ -80,6 +151,11 @@ def init_db(workspace: Path) -> sqlite3.Connection:
     conn.execute(METRICS_SCHEMA)
     conn.execute(INPUT_SETS_SCHEMA)
     conn.execute(TASK_INPUT_SETS_SCHEMA)
+    conn.execute(JOBS_SCHEMA)
+    conn.execute(JOB_METRICS_SCHEMA)
+    conn.execute(WORKFLOWS_SCHEMA)
+    conn.execute(WORKFLOW_JOBS_SCHEMA)
+    conn.execute(WORKFLOW_JOBS_UNIQUE_INDEX)
     _migrate_tasks_table(conn)
     conn.commit()
     return conn
