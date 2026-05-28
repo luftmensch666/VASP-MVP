@@ -1,3 +1,6 @@
+## 注意
+生成代码时提供详细的中文注释
+
 ## Next development focus
 
 当前系统已经完成基础本地 VASP Web 工作流。下一阶段重点是：
