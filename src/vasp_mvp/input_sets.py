@@ -90,6 +90,24 @@ def list_input_sets(conn: sqlite3.Connection) -> list[InputSet]:
     return [_row_to_input_set(row) for row in rows]
 
 
+def list_usable_input_sets(db_path: Path) -> list[InputSet]:
+    """用短连接读取可用于真实 VASP 计算的输入文件组。
+
+    新 workflow UI 使用该入口，避免在 Streamlit rerun 或切换语言时复用长期 sqlite connection。
+    """
+
+    with sqlite3.connect(Path(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT * FROM input_sets
+            WHERE usable_for_vasp = 1
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+    return [_row_to_input_set(row) for row in rows]
+
+
 def get_input_set(conn: sqlite3.Connection, input_set_id: str) -> InputSet | None:
     row = conn.execute(
         "SELECT * FROM input_sets WHERE input_set_id = ?",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 import time
@@ -16,8 +17,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from vasp_mvp.adsorption import calculate_raw_adsorption_energy
+from vasp_mvp.adsorption_workflow import create_adsorption_workflow
 from vasp_mvp.config import load_app_config, load_potcar_config
-from vasp_mvp.db import connect, create_task, list_tasks, update_task_status
+from vasp_mvp.db import connect, create_task, db_path as workspace_db_path, list_tasks, update_task_status
 from vasp_mvp.i18n import t
 from vasp_mvp.input_sets import (
     EDITABLE_INPUT_FILES,
@@ -26,6 +28,7 @@ from vasp_mvp.input_sets import (
     create_input_set,
     input_set_file_paths,
     list_input_sets,
+    list_usable_input_sets,
     rename_input_set,
     save_editable_input_file,
     update_input_set_status,
@@ -39,6 +42,7 @@ from vasp_mvp.security import safe_task_id, task_dir
 from vasp_mvp.structure_io import read_structure_upload
 from vasp_mvp.vaspkit_options import get_vaspkit_section, validate_vaspkit_values
 from vasp_mvp.vaspkit_runner import VaspkitRequest, VaspkitResult, generate_vasp_inputs_with_vaspkit, sha256_file, summarize_potcar
+from vasp_mvp.workflows import list_jobs_for_workflow, list_workflows
 
 
 TASK_TYPES = ("relax", "static", "molecule", "adsorption")
@@ -66,6 +70,9 @@ INPUT_SET_TASK_TYPE_MAP = {
     "static_single_point": "static",
 }
 ADSORPTION_INPUT_ROLES = ("adsorbed", "clean_slab", "molecule_ref")
+ADSORPTION_WORKFLOW_ROLES = ("clean_slab", "molecule_ref", "adsorbed_system")
+ADSORPTION_METHOD_FAMILIES = ("DFT", "Hybrid DFT", "DFT+U", "Other")
+ADSORPTION_FUNCTIONALS = ("PBE", "PBE-D3", "HSE06", "PBE+U", "Other")
 
 
 @st.cache_resource
@@ -121,6 +128,23 @@ def input_set_role_label(value: str) -> str:
     return tr(f"input_set.role.{value}")
 
 
+def workflow_role_label(value: str) -> str:
+    return tr(f"workflow.role.{value}")
+
+
+def workflow_status_label(value: str) -> str:
+    return tr(f"workflow.status.{value}")
+
+
+def calculation_type_label(value: str) -> str:
+    return tr(f"calculation_type.{value}")
+
+
+def adsorption_choice_label(prefix: str, value: str) -> str:
+    key = value.lower().replace("+", "_plus_").replace(" ", "_")
+    return tr(f"{prefix}.{key}")
+
+
 def none_text(value) -> str:
     return tr("value.none") if value is None else str(value)
 
@@ -151,6 +175,13 @@ def vaspkit_input_set_dir(config, input_set_id: str) -> Path:
 
 def new_vaspkit_input_set_id(task_id: str) -> str:
     return safe_task_id(f"{task_id}-{datetime.utcnow():%Y%m%d-%H%M%S-%f}")
+
+
+def new_adsorption_workflow_id(adsorbate_name: str) -> str:
+    slug = re.sub(r"[^a-z0-9_]+", "_", adsorbate_name.strip().lower()).strip("_")
+    if not slug:
+        slug = "adsorbate"
+    return safe_task_id(f"ads_{datetime.utcnow():%Y%m%d_%H%M%S}_{slug}")[:80]
 
 
 def parse_incar_overrides(text: str) -> dict[str, str]:
@@ -1019,6 +1050,177 @@ def copy_input_set_to_run(input_set: InputSet, task_run: Path) -> None:
         shutil.copy2(source, task_run / filename)
 
 
+def show_adsorption_workflow_page(config, conn) -> None:
+    db_file = workspace_db_path(config.workspace)
+    show_create_adsorption_workflow_form(config, db_file)
+    st.divider()
+    show_adsorption_workflow_list(db_file)
+    st.divider()
+    selected_workflow_id = st.session_state.get("selected_adsorption_workflow_id")
+    if selected_workflow_id:
+        show_adsorption_workflow_detail(db_file, selected_workflow_id)
+    with st.expander(tr("adsorption.legacy.title"), expanded=False):
+        show_adsorption_input_sets_page(config, conn)
+
+
+def show_create_adsorption_workflow_form(config, db_file: Path) -> None:
+    st.subheader(tr("adsorption.workflow.create.title"))
+    usable_sets = list_usable_input_sets(db_file)
+    if not usable_sets:
+        st.warning(tr("warning.adsorption_no_usable_input_sets"))
+        return
+
+    with st.form("create_adsorption_workflow_form"):
+        workflow_name = st.text_input(
+            tr("adsorption.workflow.name"),
+            value=tr("adsorption.workflow.default_name"),
+        )
+        adsorbate_name = st.text_input(
+            tr("adsorption.workflow.adsorbate_name"),
+            value="",
+            placeholder=tr("adsorption.workflow.adsorbate_placeholder"),
+        )
+        method_family = st.selectbox(
+            tr("adsorption.workflow.method_family"),
+            ADSORPTION_METHOD_FAMILIES,
+            format_func=lambda value: adsorption_choice_label("adsorption.method_family", value),
+        )
+        functional = st.selectbox(
+            tr("adsorption.workflow.functional"),
+            ADSORPTION_FUNCTIONALS,
+            format_func=lambda value: adsorption_choice_label("adsorption.functional", value),
+        )
+        method_notes = st.text_area(tr("adsorption.workflow.method_notes"))
+        selections = {
+            "clean_slab": st.selectbox(
+                tr("adsorption.workflow.input_set.clean_slab"),
+                usable_sets,
+                format_func=format_input_set_choice,
+            ),
+            "molecule_ref": st.selectbox(
+                tr("adsorption.workflow.input_set.molecule_ref"),
+                usable_sets,
+                format_func=format_input_set_choice,
+            ),
+            "adsorbed_system": st.selectbox(
+                tr("adsorption.workflow.input_set.adsorbed_system"),
+                usable_sets,
+                format_func=format_input_set_choice,
+            ),
+        }
+        notes = st.text_area(tr("adsorption.workflow.notes"))
+        submitted = st.form_submit_button(tr("button.create_adsorption_workflow"), type="primary")
+
+    if submitted:
+        workflow_id = new_adsorption_workflow_id(adsorbate_name or workflow_name)
+        root_dir = Path(config.workspace) / "workflows" / workflow_id
+        try:
+            workflow = create_adsorption_workflow(
+                db_file,
+                workflow_id=workflow_id,
+                name=workflow_name.strip() or workflow_id,
+                root_dir=root_dir,
+                clean_slab_input_set_id=selections["clean_slab"].input_set_id,
+                molecule_ref_input_set_id=selections["molecule_ref"].input_set_id,
+                adsorbed_input_set_id=selections["adsorbed_system"].input_set_id,
+                method_family=method_family,
+                functional=functional,
+                method_notes=method_notes.strip() or None,
+                mpi_ranks=config.default_mpi_ranks,
+                vasp_bin=config.vasp_bin,
+                notes=notes.strip(),
+            )
+        except Exception as exc:
+            st.error(tr("error.adsorption_workflow_create_failed", error=str(exc)))
+            return
+        st.session_state["selected_adsorption_workflow_id"] = workflow.workflow_id
+        st.success(tr("success.adsorption_workflow_created", workflow_id=workflow.workflow_id))
+        show_adsorption_workflow_detail(db_file, workflow.workflow_id)
+
+
+def format_input_set_choice(input_set: InputSet) -> str:
+    return f"{input_set.name} | {input_set.input_set_id} | {tr('table.status')}={input_set_status_label(input_set.status)}"
+
+
+def show_adsorption_workflow_list(db_file: Path) -> None:
+    st.subheader(tr("adsorption.workflow.list.title"))
+    workflows = list_workflows(db_file, workflow_type="adsorption")
+    if not workflows:
+        st.info(tr("adsorption.workflow.no_records"))
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    tr("table.workflow_id"): workflow.workflow_id,
+                    tr("table.name"): workflow.name,
+                    tr("table.status"): workflow_status_label(workflow.status),
+                    tr("table.method_family"): workflow.method_family,
+                    tr("table.functional"): workflow.functional,
+                    tr("table.root_dir"): str(workflow.root_dir),
+                    tr("table.created_at"): workflow.created_at,
+                    tr("table.updated_at"): workflow.updated_at,
+                }
+                for workflow in workflows
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+    selected = st.selectbox(
+        tr("adsorption.workflow.select"),
+        workflows,
+        format_func=lambda workflow: f"{workflow.name} | {workflow.workflow_id} | {workflow_status_label(workflow.status)}",
+    )
+    st.session_state["selected_adsorption_workflow_id"] = selected.workflow_id
+
+
+def show_adsorption_workflow_detail(db_file: Path, workflow_id: str) -> None:
+    workflow_jobs = list_jobs_for_workflow(db_file, workflow_id)
+    workflows = [workflow for workflow in list_workflows(db_file, workflow_type="adsorption") if workflow.workflow_id == workflow_id]
+    if not workflows:
+        st.warning(tr("warning.adsorption_workflow_not_found", workflow_id=workflow_id))
+        return
+    workflow = workflows[0]
+    st.subheader(tr("adsorption.workflow.detail.title"))
+    st.write(
+        {
+            tr("table.workflow_id"): workflow.workflow_id,
+            tr("table.name"): workflow.name,
+            tr("table.status"): workflow_status_label(workflow.status),
+            tr("table.root_dir"): str(workflow.root_dir),
+            tr("table.method_family"): workflow.method_family,
+            tr("table.functional"): workflow.functional,
+            tr("table.method_notes"): workflow.method_notes,
+            tr("table.notes"): workflow.notes,
+        }
+    )
+    jobs_by_role = {binding.role: (binding, job) for binding, job in workflow_jobs}
+    cols = st.columns(3)
+    for col, role in zip(cols, ADSORPTION_WORKFLOW_ROLES):
+        with col:
+            st.markdown(f"**{workflow_role_label(role)}**")
+            if role not in jobs_by_role:
+                st.warning(tr("warning.adsorption_workflow_role_missing", role=workflow_role_label(role)))
+                continue
+            binding, job = jobs_by_role[role]
+            with st.container(border=True):
+                st.write(
+                    {
+                        tr("table.role"): workflow_role_label(binding.role),
+                        tr("table.step_order"): binding.step_order,
+                        tr("table.required"): bool_label(binding.required),
+                        tr("table.job_id"): job.job_id,
+                        tr("table.calculation_type"): calculation_type_label(job.calculation_type),
+                        tr("table.status"): status_label(job.status),
+                        tr("table.input_set_id"): job.input_set_id,
+                        tr("table.run_dir"): str(job.run_dir),
+                        tr("table.created_at"): job.created_at,
+                        tr("table.updated_at"): job.updated_at,
+                    }
+                )
+
+
 def show_adsorption_input_sets_page(config, conn) -> None:
     st.subheader(tr("adsorption.input_sets.title"))
     usable_sets = [record for record in list_input_sets(conn) if record.usable_for_vasp]
@@ -1349,7 +1551,7 @@ def main() -> None:
     with input_sets_tab:
         show_input_sets_page(config, conn)
     with adsorption_tab:
-        show_adsorption_input_sets_page(config, conn)
+        show_adsorption_workflow_page(config, conn)
 
 
 if __name__ == "__main__":

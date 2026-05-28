@@ -17,6 +17,7 @@ from vasp_mvp.input_sets import (
     create_input_set,
     get_input_set,
     list_input_sets,
+    list_usable_input_sets,
     list_task_input_sets,
     rename_input_set,
     save_editable_input_file,
@@ -75,6 +76,47 @@ class InputSetsTest(unittest.TestCase):
             renamed = get_input_set(conn, "is-1")
             self.assertIsNotNone(renamed)
             self.assertEqual(renamed.name, "CeO2 validated")
+
+    def test_list_usable_input_sets_uses_db_path_short_connection(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            usable_root = workspace / "input_sets" / "usable"
+            dry_run_root = workspace / "input_sets" / "dry-run"
+            conn = init_db(workspace)
+
+            create_input_set(
+                conn,
+                input_set_id="usable",
+                name="usable",
+                source="manual",
+                status="validated",
+                usable_for_vasp=True,
+                root_dir=usable_root,
+                incar_path=usable_root / "INCAR",
+                poscar_path=usable_root / "POSCAR",
+                kpoints_path=usable_root / "KPOINTS",
+                potcar_path=usable_root / "POTCAR",
+            )
+            create_input_set(
+                conn,
+                input_set_id="dry-run",
+                name="dry-run",
+                source="vaspkit",
+                status="dry_run",
+                usable_for_vasp=False,
+                root_dir=dry_run_root,
+                incar_path=dry_run_root / "INCAR",
+                poscar_path=dry_run_root / "POSCAR",
+                kpoints_path=dry_run_root / "KPOINTS",
+                potcar_path=dry_run_root / "POTCAR",
+            )
+            conn.close()
+
+            usable_sets = list_usable_input_sets(workspace / "vasp_mvp.db")
+
+            self.assertEqual(len(usable_sets), 1)
+            self.assertEqual(usable_sets[0].input_set_id, "usable")
+            self.assertTrue(usable_sets[0].usable_for_vasp)
 
     def test_save_editable_file_creates_backup_hashes_and_history(self) -> None:
         with TemporaryDirectory() as tmp:
