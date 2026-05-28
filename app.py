@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import time
@@ -18,6 +19,7 @@ from vasp_mvp.adsorption import calculate_raw_adsorption_energy
 from vasp_mvp.config import load_app_config, load_potcar_config
 from vasp_mvp.db import connect, create_task, list_tasks, update_task_status
 from vasp_mvp.i18n import t
+from vasp_mvp.input_sets import create_input_set
 from vasp_mvp.models import TaskDraft, TaskRecord, TaskRequest
 from vasp_mvp.parser import parse_metrics
 from vasp_mvp.renderers import build_draft
@@ -96,6 +98,14 @@ def vaspkit_task_root(config, task_id: str) -> Path:
 
 def vaspkit_draft_dir(config, task_id: str) -> Path:
     return vaspkit_task_root(config, task_id) / "draft"
+
+
+def vaspkit_input_set_dir(config, input_set_id: str) -> Path:
+    return Path(config.workspace) / "input_sets" / safe_task_id(input_set_id)
+
+
+def new_vaspkit_input_set_id(task_id: str) -> str:
+    return safe_task_id(f"{task_id}-{datetime.utcnow():%Y%m%d-%H%M%S-%f}")
 
 
 def parse_incar_overrides(text: str) -> dict[str, str]:
@@ -358,10 +368,36 @@ def show_adsorption_table(default_ads: float | None = None) -> None:
         st.warning(tr("warning.adsorption_missing", fields=", ".join(missing)))
 
 
-def commit_vaspkit_draft(conn, request: VaspkitRequest, task_type: str) -> list[str]:
+def register_vaspkit_input_set(conn, result: VaspkitResult) -> None:
+    if result.input_set_path is None or not result.input_set_path.exists():
+        return
+    data = json.loads(result.input_set_path.read_text(encoding="utf-8"))
+    create_input_set(
+        conn,
+        input_set_id=data["input_set_id"],
+        name=data["name"],
+        source=data["source"],
+        status=data["status"],
+        usable_for_vasp=bool(data["usable_for_vasp"]),
+        root_dir=Path(data["root_dir"]),
+        incar_path=Path(data["incar_path"]),
+        poscar_path=Path(data["poscar_path"]),
+        kpoints_path=Path(data["kpoints_path"]),
+        potcar_path=Path(data["potcar_path"]),
+        notes=data.get("notes", ""),
+    )
+
+
+def commit_vaspkit_draft(
+    conn,
+    request: VaspkitRequest,
+    task_type: str,
+    task_id: str,
+    task_root: Path,
+) -> list[str]:
     warnings: list[str] = []
     source_dir = request.draft_dir
-    target_dir = run_dir(request.draft_dir.parent)
+    target_dir = run_dir(task_root)
     target_dir.mkdir(parents=True, exist_ok=True)
     for filename in ("POSCAR", "INCAR", "KPOINTS", "POTCAR"):
         source = source_dir / filename
@@ -374,10 +410,10 @@ def commit_vaspkit_draft(conn, request: VaspkitRequest, task_type: str) -> list[
         shutil.copy2(placeholder, target_dir / "POTCAR.placeholder")
     create_task(
         conn,
-        task_id=request.draft_dir.parent.name,
+        task_id=task_id,
         project="default",
         task_type=task_type,
-        task_root=request.draft_dir.parent,
+        task_root=task_root,
         status="committed",
     )
     return warnings
@@ -414,8 +450,9 @@ def show_generated_file_preview(result: VaspkitResult) -> None:
             {
                 tr("table.exists"): bool_label(summary.get("exists")),
                 tr("table.size_bytes"): summary.get("size_bytes", 0),
-                tr("table.path"): summary.get("path", ""),
+                tr("table.sha256"): summary.get("sha256", ""),
                 tr("table.titel_lines"): summary.get("titel_lines", []),
+                tr("table.element_order"): summary.get("element_order", []),
             }
         )
         if not summary.get("exists"):
@@ -568,7 +605,9 @@ def show_vaspkit_input_generator(config, conn) -> None:
 
     if st.button(tr("button.generate_vaspkit_draft"), type="primary"):
         safe_id = safe_task_id(task_id)
-        draft_dir = vaspkit_draft_dir(config, safe_id)
+        input_set_id = new_vaspkit_input_set_id(safe_id)
+        draft_dir = vaspkit_input_set_dir(config, input_set_id)
+        task_root = vaspkit_task_root(config, safe_id)
         draft_dir.mkdir(parents=True, exist_ok=True)
         uploaded_cif_path = None
         if uploaded_cif is not None:
@@ -596,6 +635,8 @@ def show_vaspkit_input_generator(config, conn) -> None:
             vaspkit_request = VaspkitRequest(
                 vaspkit_bin=vaspkit_bin,
                 draft_dir=draft_dir,
+                input_set_id=input_set_id,
+                input_set_name=safe_id,
                 uploaded_cif_path=uploaded_cif_path,
                 generation_mode=generation_mode,
                 element_order_mode=element_order_mode,
@@ -608,11 +649,16 @@ def show_vaspkit_input_generator(config, conn) -> None:
                 existing_potcar_policy=existing_potcar_policy,
             )
             result = generate_vasp_inputs_with_vaspkit(vaspkit_request, dry_run=vaspkit_dry_run)
+            register_vaspkit_input_set(conn, result)
             st.session_state["vaspkit_request"] = vaspkit_request
             st.session_state["vaspkit_result"] = result
             st.session_state["vaspkit_commit_task_type"] = task_type
+            st.session_state["vaspkit_commit_task_id"] = safe_id
+            st.session_state["vaspkit_commit_task_root"] = task_root
             if result.ok:
                 st.success(tr("success.vaspkit_draft_saved", path=result.request_path))
+                if result.input_set_id:
+                    st.success(tr("success.input_set_saved", input_set_id=result.input_set_id, path=result.draft_dir))
             else:
                 st.error(tr("error.vaspkit_generation_failed", errors="; ".join(result.errors)))
 
@@ -629,6 +675,8 @@ def show_vaspkit_input_generator(config, conn) -> None:
             logs[1].info(tr("info.no_stderr"))
         show_generated_file_status(result)
         show_generated_file_preview(result)
+        if result.dry_run or result.input_set_status == "dry_run":
+            st.warning(tr("warning.dry_run_input_set_not_usable"))
         st.subheader(tr("vaspkit.json_preview"))
         if result.request_path.exists():
             st.json(result.request_path.read_text(encoding="utf-8"))
@@ -636,11 +684,22 @@ def show_vaspkit_input_generator(config, conn) -> None:
             st.warning("; ".join(result.warnings))
         if result.errors:
             st.error("; ".join(result.errors))
-        if st.button(tr("button.confirm_commit_vaspkit"), disabled=not result.ok or request_obj is None):
-            warnings = commit_vaspkit_draft(conn, request_obj, st.session_state.get("vaspkit_commit_task_type", "static"))
+        commit_disabled = not result.ok or not result.usable_for_vasp or request_obj is None
+        if st.button(tr("button.confirm_commit_vaspkit"), disabled=commit_disabled):
+            commit_task_root = st.session_state.get(
+                "vaspkit_commit_task_root",
+                vaspkit_task_root(config, request_obj.input_set_id or "vaspkit-task"),
+            )
+            warnings = commit_vaspkit_draft(
+                conn,
+                request_obj,
+                st.session_state.get("vaspkit_commit_task_type", "static"),
+                st.session_state.get("vaspkit_commit_task_id", request_obj.input_set_id or "vaspkit-task"),
+                commit_task_root,
+            )
             if warnings:
                 st.warning("; ".join(warnings))
-            st.success(tr("success.vaspkit_committed", path=run_dir(request_obj.draft_dir.parent)))
+            st.success(tr("success.vaspkit_committed", path=run_dir(commit_task_root)))
 
 
 def show_workflow_page(config, potcars, conn) -> None:

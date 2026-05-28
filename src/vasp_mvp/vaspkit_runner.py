@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
@@ -12,6 +14,8 @@ from pathlib import Path
 class VaspkitRequest:
     vaspkit_bin: str
     draft_dir: Path
+    input_set_id: str | None = None
+    input_set_name: str = ""
     uploaded_cif_path: Path | None = None
     generation_mode: str = "full"
     element_order_mode: str = "default"
@@ -38,6 +42,12 @@ class VaspkitResult:
     request_path: Path
     result_path: Path
     potcar_summary: dict | None = None
+    input_set_id: str | None = None
+    input_set_status: str | None = None
+    usable_for_vasp: bool = False
+    input_set_path: Path | None = None
+    validation_path: Path | None = None
+    file_hashes_path: Path | None = None
 
 
 def check_vaspkit_available(vaspkit_bin: str) -> bool:
@@ -145,8 +155,7 @@ def generate_vasp_inputs_with_vaspkit(request: VaspkitRequest, dry_run: bool = T
             request_path=request_path,
             result_path=result_path,
         )
-        _write_result_json(result)
-        return result
+        return _finalize_input_set_artifacts(request, result)
 
     if dry_run:
         stdout_path.write_text("DRY RUN: VASPKIT was not started.\n", encoding="utf-8")
@@ -166,8 +175,7 @@ def generate_vasp_inputs_with_vaspkit(request: VaspkitRequest, dry_run: bool = T
             result_path=result_path,
             potcar_summary=summarize_potcar(draft_dir / "POTCAR"),
         )
-        _write_result_json(result)
-        return result
+        return _finalize_input_set_artifacts(request, result)
 
     if not check_vaspkit_available(request.vaspkit_bin):
         errors.append(f"VASPKIT executable is not available: {request.vaspkit_bin}")
@@ -193,8 +201,7 @@ def generate_vasp_inputs_with_vaspkit(request: VaspkitRequest, dry_run: bool = T
             result_path=result_path,
             potcar_summary=summarize_potcar(draft_dir / "POTCAR"),
         )
-        _write_result_json(result)
-        return result
+        return _finalize_input_set_artifacts(request, result)
 
     result = run_vaspkit_interactive(request.vaspkit_bin, inputs, draft_dir)
     generated = result.generated_files
@@ -217,24 +224,49 @@ def generate_vasp_inputs_with_vaspkit(request: VaspkitRequest, dry_run: bool = T
         result_path=result_path,
         potcar_summary=summarize_potcar(draft_dir / "POTCAR"),
     )
-    _write_result_json(final)
-    return final
+    return _finalize_input_set_artifacts(request, final)
 
 
 def summarize_potcar(path: Path) -> dict:
     if not path.exists():
-        return {"exists": False, "path": str(path), "size_bytes": 0, "titel_lines": []}
+        return {
+            "exists": False,
+            "size_bytes": 0,
+            "sha256": None,
+            "titel_lines": [],
+            "potential_order": [],
+            "element_order": [],
+        }
     titel_lines: list[str] = []
+    potential_order: list[str] = []
+    element_order: list[str] = []
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             if line.startswith("TITEL"):
-                titel_lines.append(line.strip())
+                title = line.strip()
+                titel_lines.append(title)
+                potential = _potential_from_titel(title)
+                if potential:
+                    potential_order.append(potential)
+                    element = _element_from_potential(potential)
+                    if element:
+                        element_order.append(element)
     return {
         "exists": True,
-        "path": str(path),
         "size_bytes": path.stat().st_size,
+        "sha256": sha256_file(path),
         "titel_lines": titel_lines,
+        "potential_order": potential_order,
+        "element_order": element_order,
     }
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _incar_key_string(request: VaspkitRequest) -> str:
@@ -318,6 +350,129 @@ def _collect_generated_files(draft_dir: Path) -> dict[str, Path]:
     return files
 
 
+def _finalize_input_set_artifacts(request: VaspkitRequest, result: VaspkitResult) -> VaspkitResult:
+    """写入 Input Set 相关元数据文件。
+
+    该函数只写 metadata/hash/validation，不启动 VASP，也不会把 POTCAR 全文写入任何 UI 预览数据。
+    """
+
+    root_dir = result.draft_dir
+    input_set_id = request.input_set_id or root_dir.name
+    input_set_name = request.input_set_name or input_set_id
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    validation = _validate_input_set_files(root_dir, result.dry_run)
+    file_hashes = _core_file_hashes(root_dir)
+    potcar_summary = summarize_potcar(root_dir / "POTCAR")
+    status = validation["status"]
+    usable_for_vasp = bool(validation["usable_for_vasp"])
+    validation_path = root_dir / "validation.json"
+    file_hashes_path = root_dir / "file_hashes.json"
+    input_set_path = root_dir / "input_set.json"
+
+    _write_json(file_hashes_path, file_hashes)
+    _write_json(validation_path, validation)
+    _write_json(
+        input_set_path,
+        {
+            "input_set_id": input_set_id,
+            "name": input_set_name,
+            "source": "vaspkit",
+            "status": status,
+            "usable_for_vasp": usable_for_vasp,
+            "root_dir": str(root_dir),
+            "incar_path": str(root_dir / "INCAR"),
+            "poscar_path": str(root_dir / "POSCAR"),
+            "kpoints_path": str(root_dir / "KPOINTS"),
+            "potcar_path": str(root_dir / "POTCAR"),
+            "created_at": now,
+            "updated_at": now,
+            "notes": "dry_run: no real POTCAR" if result.dry_run else "",
+        },
+    )
+    finalized = VaspkitResult(
+        ok=result.ok and not validation["errors"],
+        dry_run=result.dry_run,
+        return_code=result.return_code,
+        draft_dir=result.draft_dir,
+        generated_files=_collect_generated_files(root_dir),
+        warnings=result.warnings + validation["warnings"],
+        errors=result.errors + validation["errors"],
+        stdout_path=result.stdout_path,
+        stderr_path=result.stderr_path,
+        request_path=result.request_path,
+        result_path=result.result_path,
+        potcar_summary=potcar_summary,
+        input_set_id=input_set_id,
+        input_set_status=status,
+        usable_for_vasp=usable_for_vasp,
+        input_set_path=input_set_path,
+        validation_path=validation_path,
+        file_hashes_path=file_hashes_path,
+    )
+    _write_result_json(finalized)
+    return finalized
+
+
+def _validate_input_set_files(root_dir: Path, dry_run: bool) -> dict:
+    required = ("INCAR", "POSCAR", "KPOINTS", "POTCAR")
+    missing = [filename for filename in required if not (root_dir / filename).exists()]
+    empty = [filename for filename in required if (root_dir / filename).exists() and (root_dir / filename).stat().st_size == 0]
+    warnings: list[str] = []
+    errors: list[str] = []
+    if dry_run:
+        warnings.append("dry_run mode did not generate a real POTCAR; this input set is not usable for real VASP.")
+        return {
+            "status": "dry_run",
+            "usable_for_vasp": False,
+            "required_files": list(required),
+            "missing_files": missing,
+            "empty_files": empty,
+            "warnings": warnings,
+            "errors": errors,
+        }
+    if missing:
+        errors.append("Missing required input files: " + ", ".join(missing))
+    if empty:
+        errors.append("Empty required input files: " + ", ".join(empty))
+    status = "generated" if not missing and not empty else "invalid"
+    return {
+        "status": status,
+        "usable_for_vasp": status == "generated",
+        "required_files": list(required),
+        "missing_files": missing,
+        "empty_files": empty,
+        "warnings": warnings,
+        "errors": errors,
+    }
+
+
+def _core_file_hashes(root_dir: Path) -> dict:
+    hashes: dict[str, dict] = {}
+    for filename in ("INCAR", "POSCAR", "KPOINTS", "POTCAR"):
+        path = root_dir / filename
+        hashes[filename] = {
+            "exists": path.exists(),
+            "path": str(path),
+            "size_bytes": path.stat().st_size if path.exists() else 0,
+            "sha256": sha256_file(path) if path.exists() else None,
+        }
+    return hashes
+
+
+def _potential_from_titel(titel_line: str) -> str | None:
+    if "=" not in titel_line:
+        return None
+    tokens = titel_line.split("=", 1)[1].strip().split()
+    if len(tokens) < 2:
+        return None
+    return tokens[1]
+
+
+def _element_from_potential(potential: str) -> str | None:
+    match = re.match(r"([A-Z][a-z]?)", potential)
+    return match.group(1) if match else None
+
+
 def _write_request_json(request: VaspkitRequest, path: Path) -> None:
     data = asdict(request)
     data["draft_dir"] = str(request.draft_dir)
@@ -333,6 +488,9 @@ def _write_result_json(result: VaspkitResult) -> None:
     data["stderr_path"] = str(result.stderr_path)
     data["request_path"] = str(result.request_path)
     data["result_path"] = str(result.result_path)
+    data["input_set_path"] = None if result.input_set_path is None else str(result.input_set_path)
+    data["validation_path"] = None if result.validation_path is None else str(result.validation_path)
+    data["file_hashes_path"] = None if result.file_hashes_path is None else str(result.file_hashes_path)
     _write_json(result.result_path, data)
 
 
