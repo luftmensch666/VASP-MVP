@@ -17,6 +17,7 @@ from vasp_mvp.input_sets import (
     get_input_set,
     list_input_sets,
     list_task_input_sets,
+    rename_input_set,
     update_input_set_status,
 )
 
@@ -67,6 +68,11 @@ class InputSetsTest(unittest.TestCase):
             self.assertEqual(loaded.notes, "validated for local run")
             self.assertEqual(len(listed), 1)
             self.assertEqual(listed[0].input_set_id, "is-1")
+
+            rename_input_set(conn, "is-1", "CeO2 validated")
+            renamed = get_input_set(conn, "is-1")
+            self.assertIsNotNone(renamed)
+            self.assertEqual(renamed.name, "CeO2 validated")
 
     def test_bind_input_set_to_task_role(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -122,6 +122,23 @@ def update_input_set_status(
     conn.commit()
 
 
+def rename_input_set(conn: sqlite3.Connection, input_set_id: str, name: str) -> None:
+    """重命名输入文件组。
+
+    只更新数据库中的显示名称，不移动目录，避免影响已有文件路径和后续任务绑定。
+    """
+
+    conn.execute(
+        """
+        UPDATE input_sets
+        SET name = ?, updated_at = ?
+        WHERE input_set_id = ?
+        """,
+        (name.strip(), _now(), input_set_id),
+    )
+    conn.commit()
+
+
 def bind_input_set_to_task(
     conn: sqlite3.Connection,
     task_id: str,

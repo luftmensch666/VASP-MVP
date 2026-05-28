@@ -19,8 +19,8 @@ from vasp_mvp.adsorption import calculate_raw_adsorption_energy
 from vasp_mvp.config import load_app_config, load_potcar_config
 from vasp_mvp.db import connect, create_task, list_tasks, update_task_status
 from vasp_mvp.i18n import t
-from vasp_mvp.input_sets import create_input_set
-from vasp_mvp.models import TaskDraft, TaskRecord, TaskRequest
+from vasp_mvp.input_sets import create_input_set, list_input_sets, rename_input_set, update_input_set_status
+from vasp_mvp.models import InputSet, TaskDraft, TaskRecord, TaskRequest
 from vasp_mvp.parser import parse_metrics
 from vasp_mvp.renderers import build_draft
 from vasp_mvp.runner import run_dir, start_vasp, stop_task, tail_file, write_confirmed_task
@@ -28,7 +28,7 @@ from vasp_mvp.rules import default_kpoints
 from vasp_mvp.security import safe_task_id, task_dir
 from vasp_mvp.structure_io import read_structure_upload
 from vasp_mvp.vaspkit_options import get_vaspkit_section, validate_vaspkit_values
-from vasp_mvp.vaspkit_runner import VaspkitRequest, VaspkitResult, generate_vasp_inputs_with_vaspkit
+from vasp_mvp.vaspkit_runner import VaspkitRequest, VaspkitResult, generate_vasp_inputs_with_vaspkit, sha256_file, summarize_potcar
 
 
 TASK_TYPES = ("relax", "static", "molecule", "adsorption")
@@ -41,6 +41,8 @@ VASPKIT_GENERATION_MODES = (
     "potcar_only",
 )
 VASPKIT_COMMON_INCAR_KEYS = ("SR", "ST", "BD", "PU", "D3", "H6")
+INPUT_SET_FILTERS = ("all", "usable", "dry_run", "invalid", "edited")
+CORE_INPUT_FILES = ("INCAR", "POSCAR", "KPOINTS", "POTCAR")
 
 
 @st.cache_resource
@@ -65,6 +67,14 @@ def status_label(status: str) -> str:
     return tr(f"status.{status}")
 
 
+def input_set_status_label(status: str) -> str:
+    return tr(f"input_set.status.{status}")
+
+
+def input_set_source_label(source: str) -> str:
+    return tr(f"input_set.source.{source}")
+
+
 def metric_status_label(status: str) -> str:
     mapped = tr(f"metric_status.{status}")
     return status if mapped.startswith("[[missing:") else mapped
@@ -74,6 +84,10 @@ def bool_label(value: bool | None) -> str:
     if value is None:
         return tr("value.none")
     return tr("value.true") if value else tr("value.false")
+
+
+def input_set_filter_label(value: str) -> str:
+    return tr(f"input_set.filter.{value}")
 
 
 def none_text(value) -> str:
@@ -702,6 +716,244 @@ def show_vaspkit_input_generator(config, conn) -> None:
             st.success(tr("success.vaspkit_committed", path=run_dir(commit_task_root)))
 
 
+def show_input_sets_page(conn) -> None:
+    st.subheader(tr("input_set.title"))
+    records = list_input_sets(conn)
+    selected_filter = st.selectbox(
+        tr("input_set.filter.label"),
+        INPUT_SET_FILTERS,
+        format_func=input_set_filter_label,
+    )
+    filtered = [record for record in records if input_set_matches_filter(record, selected_filter)]
+    if not filtered:
+        st.info(tr("input_set.no_records"))
+        return
+
+    show_input_set_table(filtered)
+    selected = st.selectbox(
+        tr("input_set.select"),
+        filtered,
+        format_func=lambda item: f"{item.input_set_id} | {item.name} | {input_set_status_label(item.status)}",
+    )
+    show_input_set_detail(conn, selected)
+
+
+def input_set_matches_filter(record: InputSet, selected_filter: str) -> bool:
+    if selected_filter == "all":
+        return True
+    if selected_filter == "usable":
+        return record.usable_for_vasp
+    return record.status == selected_filter
+
+
+def show_input_set_table(records: list[InputSet]) -> None:
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    tr("table.input_set_id"): item.input_set_id,
+                    tr("table.name"): item.name,
+                    tr("table.source"): input_set_source_label(item.source),
+                    tr("table.status"): input_set_status_label(item.status),
+                    tr("table.usable_for_vasp"): bool_label(item.usable_for_vasp),
+                    tr("table.created_at"): item.created_at,
+                    tr("table.updated_at"): item.updated_at,
+                    tr("table.root_dir"): str(item.root_dir),
+                }
+                for item in records
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def show_input_set_detail(conn, input_set: InputSet) -> None:
+    st.subheader(tr("input_set.details"))
+    cols = st.columns(4)
+    cols[0].metric(tr("table.input_set_id"), input_set.input_set_id)
+    cols[1].metric(tr("table.status"), input_set_status_label(input_set.status))
+    cols[2].metric(tr("table.usable_for_vasp"), bool_label(input_set.usable_for_vasp))
+    cols[3].metric(tr("table.source"), input_set_source_label(input_set.source))
+    st.caption(str(input_set.root_dir))
+
+    show_input_set_actions(conn, input_set)
+    st.divider()
+    show_input_set_file_summary(input_set)
+
+    tabs = st.tabs(
+        [
+            tr("input_set.vaspkit_request"),
+            tr("input_set.vaspkit_result"),
+            tr("input_set.validation_summary"),
+        ]
+    )
+    show_json_file(tabs[0], input_set.root_dir / "vaspkit_request.json")
+    show_json_file(tabs[1], input_set.root_dir / "vaspkit_result.json")
+    show_json_file(tabs[2], input_set.root_dir / "validation.json")
+
+
+def show_input_set_actions(conn, input_set: InputSet) -> None:
+    st.subheader(tr("input_set.actions"))
+    current_validation = validate_input_set_on_disk(input_set)
+    rename_key = f"rename_{input_set.input_set_id}"
+    new_name = st.text_input(
+        tr("input_set.rename.label"),
+        value=input_set.name,
+        key=rename_key,
+    )
+    action_cols = st.columns(4)
+    if action_cols[0].button(tr("button.rename_input_set"), key=f"rename_btn_{input_set.input_set_id}"):
+        rename_input_set(conn, input_set.input_set_id, new_name)
+        st.success(tr("success.input_set_renamed"))
+        st.rerun()
+    if action_cols[1].button(tr("button.validate_input_set"), key=f"validate_btn_{input_set.input_set_id}"):
+        validation = validate_input_set_on_disk(input_set)
+        next_status = "dry_run" if input_set.status == "dry_run" else ("validated" if validation["usable_for_vasp"] else "invalid")
+        next_usable = False if input_set.status == "dry_run" else bool(validation["usable_for_vasp"])
+        update_input_set_status(
+            conn,
+            input_set.input_set_id,
+            next_status,
+            usable_for_vasp=next_usable,
+        )
+        write_json_file(input_set.root_dir / "validation.json", validation)
+        write_json_file(input_set.root_dir / "file_hashes.json", build_input_file_hashes(input_set))
+        if validation["usable_for_vasp"]:
+            st.success(tr("success.input_set_validated"))
+        elif input_set.status == "dry_run" and not validation["errors"]:
+            st.warning(tr("warning.dry_run_input_set_not_usable"))
+        else:
+            st.warning(tr("warning.input_set_validation_failed", errors="; ".join(validation["errors"])))
+        st.rerun()
+    can_mark_usable = current_validation["usable_for_vasp"] and input_set.status != "dry_run"
+    if action_cols[2].button(
+        tr("button.mark_usable"),
+        key=f"usable_btn_{input_set.input_set_id}",
+        disabled=not can_mark_usable,
+    ):
+        update_input_set_status(conn, input_set.input_set_id, "validated", usable_for_vasp=True)
+        st.success(tr("success.input_set_marked_usable"))
+        st.rerun()
+    if action_cols[3].button(tr("button.mark_not_usable"), key=f"not_usable_btn_{input_set.input_set_id}"):
+        update_input_set_status(conn, input_set.input_set_id, "invalid", usable_for_vasp=False)
+        st.success(tr("success.input_set_marked_not_usable"))
+        st.rerun()
+    st.button(
+        tr("button.copy_to_task_run_directory"),
+        disabled=True,
+        help=tr("input_set.copy_to_task_run_directory.help"),
+    )
+
+
+def show_input_set_file_summary(input_set: InputSet) -> None:
+    st.subheader(tr("input_set.files"))
+    file_hashes = read_json_file(input_set.root_dir / "file_hashes.json") or {}
+    rows = []
+    for filename, path in input_set_file_paths(input_set).items():
+        hash_info = file_hashes.get(filename, {})
+        exists = path.exists()
+        rows.append(
+            {
+                tr("table.file"): filename,
+                tr("table.exists"): bool_label(exists),
+                tr("table.size_bytes"): path.stat().st_size if exists else 0,
+                tr("table.sha256"): hash_info.get("sha256") or (sha256_file(path) if exists else None),
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    potcar_summary = summarize_potcar(input_set.potcar_path)
+    st.subheader(tr("tabs.potcar"))
+    st.write(
+        {
+            tr("table.exists"): bool_label(potcar_summary.get("exists")),
+            tr("table.size_bytes"): potcar_summary.get("size_bytes", 0),
+            tr("table.sha256"): potcar_summary.get("sha256"),
+            tr("table.titel_lines"): potcar_summary.get("titel_lines", []),
+        }
+    )
+    st.caption(tr("vaspkit.potcar_no_full_preview"))
+
+
+def show_json_file(tab, path: Path) -> None:
+    with tab:
+        data = read_json_file(path)
+        if data is None:
+            st.info(tr("info.file_not_generated", filename=path.name))
+        else:
+            st.json(data)
+
+
+def validate_input_set_on_disk(input_set: InputSet) -> dict:
+    missing: list[str] = []
+    empty: list[str] = []
+    for filename, path in input_set_file_paths(input_set).items():
+        if not path.exists():
+            missing.append(filename)
+        elif path.stat().st_size == 0:
+            empty.append(filename)
+    errors: list[str] = []
+    if missing:
+        errors.append(tr("input_set.validation.missing_files", files=", ".join(missing)))
+    if empty:
+        errors.append(tr("input_set.validation.empty_files", files=", ".join(empty)))
+    if input_set.status == "dry_run":
+        return {
+            "status": "dry_run",
+            "usable_for_vasp": False,
+            "required_files": list(CORE_INPUT_FILES),
+            "missing_files": missing,
+            "empty_files": empty,
+            "warnings": [tr("warning.dry_run_input_set_not_usable")],
+            "errors": errors,
+            "validated_at": datetime.utcnow().isoformat(timespec="seconds"),
+        }
+    return {
+        "status": "validated" if not errors else "invalid",
+        "usable_for_vasp": not errors,
+        "required_files": list(CORE_INPUT_FILES),
+        "missing_files": missing,
+        "empty_files": empty,
+        "warnings": [],
+        "errors": errors,
+        "validated_at": datetime.utcnow().isoformat(timespec="seconds"),
+    }
+
+
+def build_input_file_hashes(input_set: InputSet) -> dict:
+    hashes: dict[str, dict] = {}
+    for filename, path in input_set_file_paths(input_set).items():
+        hashes[filename] = {
+            "exists": path.exists(),
+            "size_bytes": path.stat().st_size if path.exists() else 0,
+            "sha256": sha256_file(path) if path.exists() else None,
+        }
+    return hashes
+
+
+def input_set_file_paths(input_set: InputSet) -> dict[str, Path]:
+    return {
+        "INCAR": input_set.incar_path,
+        "POSCAR": input_set.poscar_path,
+        "KPOINTS": input_set.kpoints_path,
+        "POTCAR": input_set.potcar_path,
+    }
+
+
+def read_json_file(path: Path):
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"error": tr("error.invalid_json_file", filename=path.name)}
+
+
+def write_json_file(path: Path, data: dict) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def show_workflow_page(config, potcars, conn) -> None:
     try:
         draft, dry_run = sidebar_new_task(config, potcars)
@@ -735,11 +987,15 @@ def main() -> None:
     conn = connect(config.workspace)
 
     st.title(tr("app.title"))
-    workflow_tab, vaspkit_tab = st.tabs([tr("tabs.workflow"), tr("tabs.vaspkit_generator")])
+    workflow_tab, vaspkit_tab, input_sets_tab = st.tabs(
+        [tr("tabs.workflow"), tr("tabs.vaspkit_generator"), tr("tabs.input_sets")]
+    )
     with workflow_tab:
         show_workflow_page(config, potcars, conn)
     with vaspkit_tab:
         show_vaspkit_input_generator(config, conn)
+    with input_sets_tab:
+        show_input_sets_page(conn)
 
 
 if __name__ == "__main__":
