@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import sqlite3
 import sys
 import time
 from datetime import datetime
@@ -73,6 +74,16 @@ ADSORPTION_INPUT_ROLES = ("adsorbed", "clean_slab", "molecule_ref")
 ADSORPTION_WORKFLOW_ROLES = ("clean_slab", "molecule_ref", "adsorbed_system")
 ADSORPTION_METHOD_FAMILIES = ("DFT", "Hybrid DFT", "DFT+U", "Other")
 ADSORPTION_FUNCTIONALS = ("PBE", "PBE-D3", "HSE06", "PBE+U", "Other")
+NAVIGATION_PAGES = (
+    "dashboard",
+    "vaspkit",
+    "input_sets",
+    "adsorption",
+    "single_atom",
+    "molecule_optimization",
+    "jobs_logs",
+    "settings",
+)
 
 
 @st.cache_resource
@@ -216,6 +227,18 @@ def language_selector() -> None:
         format_func=lambda code: t(f"language.{code}", current_lang()),
     )
     st.session_state["lang"] = selected
+
+
+def navigation_selector() -> str:
+    st.sidebar.header(tr("sidebar.navigation"))
+    selected = st.sidebar.radio(
+        tr("sidebar.page"),
+        NAVIGATION_PAGES,
+        format_func=lambda page: tr(f"nav.{page}"),
+        label_visibility="collapsed",
+    )
+    st.sidebar.caption(tr("sidebar.system_status"))
+    return selected
 
 
 def sidebar_new_task(config, potcars) -> tuple[TaskDraft | None, bool]:
@@ -1050,8 +1073,74 @@ def copy_input_set_to_run(input_set: InputSet, task_run: Path) -> None:
         shutil.copy2(source, task_run / filename)
 
 
-def show_adsorption_workflow_page(config, conn) -> None:
-    db_file = workspace_db_path(config.workspace)
+def show_dashboard_page(db_file: Path) -> None:
+    st.subheader(tr("dashboard.title"))
+    cols = st.columns(3)
+    cols[0].metric(tr("dashboard.input_sets"), count_table_rows(db_file, "input_sets"))
+    cols[1].metric(tr("dashboard.workflows"), count_table_rows(db_file, "workflows"))
+    cols[2].metric(tr("dashboard.jobs"), count_table_rows(db_file, "jobs"))
+    workflows = list_workflows(db_file)[:5]
+    if workflows:
+        st.subheader(tr("dashboard.recent_workflows"))
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        tr("table.workflow_id"): workflow.workflow_id,
+                        tr("table.name"): workflow.name,
+                        tr("table.status"): workflow_status_label(workflow.status),
+                        tr("table.functional"): workflow.functional,
+                        tr("table.updated_at"): workflow.updated_at,
+                    }
+                    for workflow in workflows
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(tr("dashboard.no_workflows"))
+
+
+def count_table_rows(db_file: Path, table: str) -> int:
+    allowed = {"input_sets", "workflows", "jobs"}
+    if table not in allowed:
+        raise ValueError(f"Unsupported table for dashboard count: {table}")
+    with sqlite3.connect(Path(db_file)) as conn:
+        row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+    return int(row[0])
+
+
+def show_module_placeholder_page(title_key: str) -> None:
+    st.subheader(tr(title_key))
+    st.info(tr("module.placeholder"))
+
+
+def show_settings_page() -> None:
+    show_module_placeholder_page("settings.title")
+
+
+def show_jobs_logs_page(db_file: Path) -> None:
+    st.subheader(tr("jobs_logs.title"))
+    st.info(tr("jobs_logs.legacy_notice"))
+    conn = connect_to_legacy_tasks(db_file)
+    try:
+        records = list_tasks(conn)
+    finally:
+        conn.close()
+    task = selected_task(records)
+    if task:
+        show_running_cards(records)
+        show_monitor(task)
+
+
+def connect_to_legacy_tasks(db_file: Path):
+    conn = sqlite3.connect(Path(db_file))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def show_adsorption_workflow_page(config, db_file: Path) -> None:
     show_create_adsorption_workflow_form(config, db_file)
     st.divider()
     show_adsorption_workflow_list(db_file)
@@ -1059,8 +1148,6 @@ def show_adsorption_workflow_page(config, conn) -> None:
     selected_workflow_id = st.session_state.get("selected_adsorption_workflow_id")
     if selected_workflow_id:
         show_adsorption_workflow_detail(db_file, selected_workflow_id)
-    with st.expander(tr("adsorption.legacy.title"), expanded=False):
-        show_adsorption_input_sets_page(config, conn)
 
 
 def show_create_adsorption_workflow_form(config, db_file: Path) -> None:
@@ -1538,20 +1625,36 @@ def main() -> None:
     st.set_page_config(page_title=t("app.page_title", "zh"), layout="wide")
     language_selector()
     config, potcars = resources()
-    conn = connect(config.workspace)
+    init_conn = connect(config.workspace)
+    init_conn.close()
+    db_file = workspace_db_path(config.workspace)
+    selected_page = navigation_selector()
 
     st.title(tr("app.title"))
-    workflow_tab, vaspkit_tab, input_sets_tab, adsorption_tab = st.tabs(
-        [tr("tabs.workflow"), tr("tabs.vaspkit_generator"), tr("tabs.input_sets"), tr("tabs.adsorption")]
-    )
-    with workflow_tab:
-        show_workflow_page(config, potcars, conn)
-    with vaspkit_tab:
-        show_vaspkit_input_generator(config, conn)
-    with input_sets_tab:
-        show_input_sets_page(config, conn)
-    with adsorption_tab:
-        show_adsorption_workflow_page(config, conn)
+    if selected_page == "dashboard":
+        show_dashboard_page(db_file)
+    elif selected_page == "vaspkit":
+        conn = connect(config.workspace)
+        try:
+            show_vaspkit_input_generator(config, conn)
+        finally:
+            conn.close()
+    elif selected_page == "input_sets":
+        conn = connect(config.workspace)
+        try:
+            show_input_sets_page(config, conn)
+        finally:
+            conn.close()
+    elif selected_page == "adsorption":
+        show_adsorption_workflow_page(config, db_file)
+    elif selected_page == "single_atom":
+        show_module_placeholder_page("nav.single_atom")
+    elif selected_page == "molecule_optimization":
+        show_module_placeholder_page("nav.molecule_optimization")
+    elif selected_page == "jobs_logs":
+        show_jobs_logs_page(db_file)
+    elif selected_page == "settings":
+        show_settings_page()
 
 
 if __name__ == "__main__":
