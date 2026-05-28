@@ -41,3 +41,66 @@ Codex must not:
 - commit POTCAR, WAVECAR, CHGCAR, OUTCAR, vasprun.xml, or large calculation files;
 - use shell=True in subprocess calls;
 - rewrite the whole project when a small patch is enough.
+
+## VASPKIT input generation rules
+
+The system should use VASPKIT as the preferred generator for VASP input files when the user uploads CIF files.
+
+Target workflow:
+
+1. User uploads a CIF file.
+2. The system writes the CIF file into a draft workspace.
+3. The system calls VASPKIT to generate:
+   - POSCAR from CIF
+   - INCAR
+   - KPOINTS
+   - POTCAR
+4. The generated files remain in draft state.
+5. The user must preview and confirm them before the files are committed into a runnable VASP task directory.
+
+Important rules:
+
+- Do not bypass the draft preview and manual confirmation step.
+- Do not modify the VASP installation directory.
+- Do not modify the POTCAR library.
+- Do not commit POTCAR to git.
+- Do not use shell=True for subprocess.
+- Do not use shell pipes such as echo ... | vaspkit in Python code.
+- Use subprocess.run([...], input="...", text=True, cwd=...) when interactive VASPKIT input is required.
+- Capture VASPKIT stdout/stderr into log files.
+- If VASPKIT fails, show the error log in the UI and do not create a runnable task.
+- VASPKIT-generated INCAR must still be editable and explainable in the UI.
+- The system must check POSCAR/POTCAR element order after VASPKIT generation.
+
+Suggested VASPKIT task IDs:
+- 105: Generate POSCAR file from CIF
+- 101: Customize INCAR file
+- 102: Generate KPOINTS file for SCF calculation
+- 103: Generate POTCAR file with default setting
+- 104: Generate POTCAR file with user specified potential
+- 108: Successive procedure to generate VASP files and check
+
+The implementation should wrap VASPKIT in a dedicated Python module, not scatter VASPKIT calls inside app.py.
+
+## Bilingual UI / i18n rules
+
+The UI must support Chinese and English switching.
+
+Required behavior:
+
+1. Add a language switch button or segmented control in the sidebar.
+2. Support at least:
+   - zh_CN
+   - en_US
+3. All Streamlit-visible text must go through an i18n helper function.
+4. Do not hardcode UI labels directly in app.py after i18n is introduced.
+5. Add or update both Chinese and English translation files whenever UI text changes.
+6. If a translation key is missing, show the key itself and report it in diagnostics.
+7. New future UI features must include both Chinese and English text at the same time.
+
+Recommended files:
+
+- src/vasp_mvp/i18n.py
+- locales/zh_CN.json
+- locales/en_US.json
+- tests/test_i18n.py
