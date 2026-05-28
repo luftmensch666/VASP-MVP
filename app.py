@@ -65,6 +65,7 @@ INPUT_SET_TASK_TYPE_MAP = {
     "slab_optimization": "relax",
     "static_single_point": "static",
 }
+ADSORPTION_INPUT_ROLES = ("adsorbed", "clean_slab", "molecule_ref")
 
 
 @st.cache_resource
@@ -114,6 +115,10 @@ def input_set_filter_label(value: str) -> str:
 
 def input_set_task_module_label(value: str) -> str:
     return tr(f"input_set.task_module.{value}")
+
+
+def input_set_role_label(value: str) -> str:
+    return tr(f"input_set.role.{value}")
 
 
 def none_text(value) -> str:
@@ -1010,6 +1015,168 @@ def copy_input_set_to_run(input_set: InputSet, task_run: Path) -> None:
         shutil.copy2(source, task_run / filename)
 
 
+def show_adsorption_input_sets_page(config, conn) -> None:
+    st.subheader(tr("adsorption.input_sets.title"))
+    usable_sets = [record for record in list_input_sets(conn) if record.usable_for_vasp]
+    if not usable_sets:
+        st.info(tr("adsorption.input_sets.no_usable"))
+        return
+
+    task_id = st.text_input(
+        tr("sidebar.task_id"),
+        f"adsorption-{datetime.utcnow():%Y%m%d-%H%M%S}",
+        key="adsorption_input_set_task_id",
+    )
+    selections: dict[str, InputSet] = {}
+    for role in ADSORPTION_INPUT_ROLES:
+        selections[role] = st.selectbox(
+            tr(f"adsorption.input_set.{role}"),
+            usable_sets,
+            format_func=lambda item: f"{item.input_set_id} | {item.name}",
+            key=f"adsorption_input_set_{role}",
+        )
+
+    warnings = adsorption_input_set_warnings(
+        selections["adsorbed"],
+        selections["clean_slab"],
+        selections["molecule_ref"],
+    )
+    for warning in warnings:
+        st.warning(warning)
+
+    if st.button(tr("button.create_adsorption_task"), type="primary"):
+        safe_id = safe_task_id(task_id)
+        task_root = task_dir(config, safe_id)
+        existing_inputs = [
+            role
+            for role in ADSORPTION_INPUT_ROLES
+            if any(((task_root / role / "run") / filename).exists() for filename in CORE_INPUT_FILES)
+        ]
+        if existing_inputs:
+            st.error(tr("error.adsorption_role_run_exists", roles=", ".join(existing_inputs), path=task_root))
+            return
+        create_adsorption_task_from_input_sets(conn, safe_id, task_root, selections, warnings)
+        st.success(tr("success.adsorption_task_created", task_id=safe_id, path=task_root))
+        st.rerun()
+
+
+def create_adsorption_task_from_input_sets(
+    conn,
+    task_id: str,
+    task_root: Path,
+    selections: dict[str, InputSet],
+    warnings: list[str],
+) -> None:
+    task_root.mkdir(parents=True, exist_ok=True)
+    binding_metadata: list[dict] = []
+    for role, input_set in selections.items():
+        role_run = task_root / role / "run"
+        role_run.mkdir(parents=True, exist_ok=True)
+        copy_input_set_to_run(input_set, role_run)
+        role_binding = {
+            "task_id": task_id,
+            "role": role,
+            "input_set_id": input_set.input_set_id,
+            "input_set_name": input_set.name,
+            "run_dir": str(role_run),
+            "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+        }
+        write_json_file(role_run / "input_set_binding.json", role_binding)
+        binding_metadata.append(role_binding)
+
+    task_metadata = {
+        "task_id": task_id,
+        "task_type": "adsorption",
+        "created_from": "adsorption_input_sets",
+        "formula": "E_ads = E_adsorbed - E_clean_slab - E_molecule_ref",
+        "roles": binding_metadata,
+        "warnings": warnings,
+        "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+    }
+    write_json_file(task_root / "task.json", task_metadata)
+    write_json_file(task_root / "input_set_bindings.json", {"bindings": binding_metadata})
+    create_task(
+        conn,
+        task_id=task_id,
+        project="default",
+        task_type="adsorption",
+        task_root=task_root,
+        status="committed",
+    )
+    for role, input_set in selections.items():
+        bind_input_set_to_task(conn, task_id, role, input_set.input_set_id)
+
+
+def adsorption_input_set_warnings(adsorbed: InputSet, clean_slab: InputSet, molecule_ref: InputSet) -> list[str]:
+    warnings: list[str] = []
+    if len({adsorbed.input_set_id, clean_slab.input_set_id, molecule_ref.input_set_id}) < 3:
+        warnings.append(tr("warning.adsorption_duplicate_input_sets"))
+
+    ads_encut = parse_incar_value(adsorbed.incar_path, "ENCUT")
+    slab_encut = parse_incar_value(clean_slab.incar_path, "ENCUT")
+    if ads_encut and slab_encut and ads_encut != slab_encut:
+        warnings.append(tr("warning.adsorption_encut_mismatch", adsorbed=ads_encut, clean_slab=slab_encut))
+    elif not ads_encut or not slab_encut:
+        warnings.append(tr("warning.adsorption_encut_missing"))
+
+    ads_kpoints = normalized_text(adsorbed.kpoints_path)
+    slab_kpoints = normalized_text(clean_slab.kpoints_path)
+    if ads_kpoints and slab_kpoints and ads_kpoints != slab_kpoints:
+        warnings.append(tr("warning.adsorption_kpoints_mismatch"))
+
+    for role, input_set in (
+        ("adsorbed", adsorbed),
+        ("clean_slab", clean_slab),
+        ("molecule_ref", molecule_ref),
+    ):
+        warnings.extend(potcar_order_warnings(role, input_set))
+
+    if not is_gamma_only_kpoints(molecule_ref.kpoints_path):
+        warnings.append(tr("warning.adsorption_molecule_not_gamma"))
+    return warnings
+
+
+def potcar_order_warnings(role: str, input_set: InputSet) -> list[str]:
+    poscar_species = extract_poscar_species(input_set.poscar_path) if input_set.poscar_path.exists() else []
+    potcar_species = summarize_potcar(input_set.potcar_path).get("element_order", []) if input_set.potcar_path.exists() else []
+    if poscar_species and potcar_species and poscar_species != potcar_species:
+        return [
+            tr(
+                "warning.adsorption_potcar_order_mismatch",
+                role=input_set_role_label(role),
+                poscar=", ".join(poscar_species),
+                potcar=", ".join(potcar_species),
+            )
+        ]
+    return []
+
+
+def parse_incar_value(path: Path, key: str) -> str | None:
+    if not path.exists():
+        return None
+    target = key.upper()
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        clean = line.split("#", 1)[0].split("!", 1)[0].strip()
+        if "=" not in clean:
+            continue
+        left, right = clean.split("=", 1)
+        if left.strip().upper() == target:
+            return right.strip()
+    return None
+
+
+def normalized_text(path: Path) -> tuple[str, ...]:
+    if not path.exists():
+        return ()
+    return tuple(line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip())
+
+
+def is_gamma_only_kpoints(path: Path) -> bool:
+    lines = normalized_text(path)
+    text = " ".join(lines).lower()
+    return "gamma" in text and any(line.replace("\t", " ").split()[:3] == ["1", "1", "1"] for line in lines)
+
+
 def show_input_set_file_summary(input_set: InputSet) -> None:
     st.subheader(tr("input_set.files"))
     file_hashes = read_json_file(input_set.root_dir / "file_hashes.json") or {}
@@ -1168,8 +1335,8 @@ def main() -> None:
     conn = connect(config.workspace)
 
     st.title(tr("app.title"))
-    workflow_tab, vaspkit_tab, input_sets_tab = st.tabs(
-        [tr("tabs.workflow"), tr("tabs.vaspkit_generator"), tr("tabs.input_sets")]
+    workflow_tab, vaspkit_tab, input_sets_tab, adsorption_tab = st.tabs(
+        [tr("tabs.workflow"), tr("tabs.vaspkit_generator"), tr("tabs.input_sets"), tr("tabs.adsorption")]
     )
     with workflow_tab:
         show_workflow_page(config, potcars, conn)
@@ -1177,6 +1344,8 @@ def main() -> None:
         show_vaspkit_input_generator(config, conn)
     with input_sets_tab:
         show_input_sets_page(config, conn)
+    with adsorption_tab:
+        show_adsorption_input_sets_page(config, conn)
 
 
 if __name__ == "__main__":
