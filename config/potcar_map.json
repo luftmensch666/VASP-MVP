@@ -1,0 +1,19 @@
+{
+  "family": "PBE",
+  "elements": {
+    "H": "H",
+    "C": "C",
+    "N": "N",
+    "O": "O",
+    "F": "F",
+    "P": "P",
+    "S": "S",
+    "Cl": "Cl",
+    "Fe": "Fe_pv",
+    "Co": "Co",
+    "Ni": "Ni",
+    "Cu": "Cu",
+    "Mn": "Mn_pv",
+    "Zn": "Zn"
+  }
+}

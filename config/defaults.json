@@ -1,0 +1,9 @@
+{
+  "vasp_bin": "/root/hyq/vasp.6.4.3/bin/vasp_std",
+  "potpaw_pbe": "/root/potpaw_PBE",
+  "workspace": "workspace",
+  "default_mpi_ranks": 20,
+  "allowed_mpi_ranks": [4, 8, 12, 16, 20, 24],
+  "omp_num_threads": 1,
+  "openblas_num_threads": 1
+}
