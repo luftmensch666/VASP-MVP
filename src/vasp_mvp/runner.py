@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import signal
 import sqlite3
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from . import db
@@ -44,7 +46,7 @@ def write_confirmed_task(config: AppConfig, potcars: PotcarConfig, draft: TaskDr
     db.upsert_task(
         conn,
         task_id=request.task_id,
-        status="ready",
+        status="committed",
         path=task_root,
         task_type=request.task_type,
     )
@@ -67,13 +69,17 @@ def start_vasp(
 
     out_path = workdir / "vasp.out"
     args = mpirun_args(ranks, config.vasp_bin)
+    start_time = datetime.utcnow()
     if dry_run:
-        out_path.write_text(
-            "DRY RUN: VASP was not started.\n"
-            f"Would run: {' '.join(args)}\n",
-            encoding="utf-8",
+        db.update_task_status(conn, request.task_id, "running", start_time=start_time)
+        _write_dry_run_outputs(workdir, args)
+        db.update_task_status(
+            conn,
+            request.task_id,
+            "finished",
+            end_time=datetime.utcnow(),
+            return_code=0,
         )
-        db.update_status(conn, request.task_id, "finished", pid=None)
         return None
 
     vasp_bin = validate_vasp_bin(config)
@@ -92,8 +98,18 @@ def start_vasp(
             shell=False,
             start_new_session=True,
         )
-    db.update_status(conn, request.task_id, "running", pid=process.pid)
+    db.update_task_status(conn, request.task_id, "running", pid=process.pid, start_time=start_time)
     return process
+
+
+def stop_task(pid: int) -> None:
+    if pid <= 0:
+        raise ValueError("PID must be a positive integer.")
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError as exc:
+        raise ProcessLookupError(f"Process {pid} no longer exists.") from exc
+    os.killpg(pgid, signal.SIGTERM)
 
 
 def tail_file(path: Path, max_bytes: int = 20000) -> str:
@@ -116,3 +132,23 @@ def _write_potcar(config: AppConfig, potcars: PotcarConfig, elements: tuple[str,
         for path in paths:
             with path.open("rb") as src:
                 out.write(src.read())
+
+
+def _write_dry_run_outputs(workdir: Path, args: list[str]) -> None:
+    (workdir / "vasp.out").write_text(
+        "DRY RUN: VASP was not started.\n"
+        f"Would run: {' '.join(args)}\n"
+        "dry run completed successfully\n",
+        encoding="utf-8",
+    )
+    (workdir / "OSZICAR").write_text(
+        " 1 F= -.10000000E+02 E0= -.10000000E+02 d E =0\n"
+        " 2 F= -.10500000E+02 E0= -.10500000E+02 d E =-.5\n",
+        encoding="utf-8",
+    )
+    (workdir / "OUTCAR").write_text(
+        " free  energy   TOTEN  =       -10.500000 eV\n"
+        " LOOP:  cpu time   1.00: real time   2.00\n"
+        " reached required accuracy - stopping structural energy minimisation\n",
+        encoding="utf-8",
+    )

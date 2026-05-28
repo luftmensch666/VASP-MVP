@@ -15,11 +15,11 @@ if str(SRC) not in sys.path:
 
 from vasp_mvp.adsorption import calculate_raw_adsorption_energy
 from vasp_mvp.config import load_app_config, load_potcar_config
-from vasp_mvp.db import connect, list_tasks
+from vasp_mvp.db import connect, list_tasks, update_task_status
 from vasp_mvp.models import TaskDraft, TaskRecord, TaskRequest
 from vasp_mvp.parser import parse_metrics
 from vasp_mvp.renderers import build_draft
-from vasp_mvp.runner import run_dir, start_vasp, tail_file, write_confirmed_task
+from vasp_mvp.runner import run_dir, start_vasp, stop_task, tail_file, write_confirmed_task
 from vasp_mvp.rules import default_kpoints
 from vasp_mvp.security import safe_task_id
 from vasp_mvp.structure_io import read_structure_upload
@@ -123,11 +123,68 @@ def draft_actions(config, potcars, conn, draft: TaskDraft, dry_run: bool) -> Non
 def selected_task(records: list[TaskRecord]) -> TaskRecord | None:
     if not records:
         return None
+    show_task_list(records)
     return st.selectbox(
         "Task",
         records,
         format_func=lambda task: f"{task.task_id} | {task.task_type} | {task.status}",
     )
+
+
+def show_task_list(records: list[TaskRecord]) -> None:
+    st.subheader("Task List")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "task_id": task.task_id,
+                    "project": task.project,
+                    "type": task.task_type,
+                    "status": task.status,
+                    "pid": task.pid,
+                    "return_code": task.return_code,
+                    "start_time": task.start_time,
+                    "end_time": task.end_time,
+                    "task_root": str(task.task_root),
+                }
+                for task in records
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def show_running_cards(records: list[TaskRecord]) -> None:
+    running = [task for task in records if task.status == "running"]
+    if not running:
+        return
+    st.subheader("Running Tasks")
+    for task in running:
+        with st.container(border=True):
+            cols = st.columns(4)
+            cols[0].metric("Task", task.task_id)
+            cols[1].metric("PID", "None" if task.pid is None else str(task.pid))
+            cols[2].metric("Type", task.task_type)
+            cols[3].metric("Started", "None" if task.start_time is None else task.start_time.isoformat(sep=" "))
+
+
+def show_stop_control(conn, task: TaskRecord) -> None:
+    if task.status != "running" or task.pid is None:
+        return
+    st.subheader("Stop Task")
+    confirm_key = f"confirm_stop_{task.task_id}"
+    st.checkbox("我确认要停止该任务的整个进程组", key=confirm_key)
+    if st.button("停止任务", disabled=not st.session_state.get(confirm_key, False)):
+        try:
+            stop_task(task.pid)
+            update_task_status(conn, task.task_id, "stopped", end_time=datetime.utcnow())
+            st.success("Stop signal sent.")
+        except ProcessLookupError as exc:
+            update_task_status(conn, task.task_id, "failed", end_time=datetime.utcnow(), return_code=-1)
+            st.error(str(exc))
+        except Exception as exc:
+            st.error(str(exc))
 
 
 def show_monitor(task: TaskRecord) -> None:
@@ -204,11 +261,14 @@ def main() -> None:
         st.info("Upload a structure in the left sidebar and generate a draft.")
 
     st.divider()
-    task = selected_task(list_tasks(conn))
+    records = list_tasks(conn)
+    task = selected_task(records)
     if task:
+        show_running_cards(records)
         left, right = st.columns([1, 1])
         with left:
             show_monitor(task)
+            show_stop_control(conn, task)
         with right:
             show_results(task)
 

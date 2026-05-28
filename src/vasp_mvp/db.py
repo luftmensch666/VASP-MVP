@@ -18,7 +18,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     task_root TEXT NOT NULL,
     pid INTEGER,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    start_time TEXT,
+    end_time TEXT,
+    return_code INTEGER
 );
 """
 
@@ -45,6 +48,7 @@ def init_db(workspace: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute(TASKS_SCHEMA)
     conn.execute(METRICS_SCHEMA)
+    _migrate_tasks_table(conn)
     conn.commit()
     return conn
 
@@ -56,23 +60,69 @@ def create_task(
     project: str,
     task_type: TaskType,
     task_root: Path,
-    status: TaskStatus = "ready",
+    status: TaskStatus = "committed",
     pid: int | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    return_code: int | None = None,
 ) -> None:
     now = _now()
     conn.execute(
         """
-        INSERT INTO tasks (task_id, project, task_type, status, task_root, pid, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO tasks (
+            task_id, project, task_type, status, task_root, pid,
+            created_at, updated_at, start_time, end_time, return_code
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(task_id) DO UPDATE SET
             project = excluded.project,
             task_type = excluded.task_type,
             status = excluded.status,
             task_root = excluded.task_root,
             pid = excluded.pid,
+            start_time = excluded.start_time,
+            end_time = excluded.end_time,
+            return_code = excluded.return_code,
             updated_at = excluded.updated_at
         """,
-        (task_id, project, task_type, status, str(Path(task_root)), pid, now, now),
+        (
+            task_id,
+            project,
+            task_type,
+            status,
+            str(Path(task_root)),
+            pid,
+            now,
+            now,
+            _dt_to_text(start_time),
+            _dt_to_text(end_time),
+            return_code,
+        ),
+    )
+    conn.commit()
+
+
+def update_task_status(
+    conn: sqlite3.Connection,
+    task_id: str,
+    status: TaskStatus,
+    pid: int | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    return_code: int | None = None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = ?,
+            pid = COALESCE(?, pid),
+            start_time = COALESCE(?, start_time),
+            end_time = COALESCE(?, end_time),
+            return_code = COALESCE(?, return_code),
+            updated_at = ?
+        WHERE task_id = ?
+        """,
+        (status, pid, _dt_to_text(start_time), _dt_to_text(end_time), return_code, _now(), task_id),
     )
     conn.commit()
 
@@ -83,15 +133,12 @@ def update_status(
     status: TaskStatus,
     pid: int | None = None,
 ) -> None:
-    conn.execute(
-        """
-        UPDATE tasks
-        SET status = ?, pid = COALESCE(?, pid), updated_at = ?
-        WHERE task_id = ?
-        """,
-        (status, pid, _now(), task_id),
-    )
-    conn.commit()
+    update_task_status(conn, task_id, status, pid=pid)
+
+
+def get_task(conn: sqlite3.Connection, task_id: str) -> TaskRecord | None:
+    row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+    return _row_to_task(row) if row else None
 
 
 def list_tasks(conn: sqlite3.Connection) -> list[TaskRecord]:
@@ -174,8 +221,32 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         pid=row["pid"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
+        start_time=_text_to_dt(row["start_time"]),
+        end_time=_text_to_dt(row["end_time"]),
+        return_code=row["return_code"],
     )
 
 
 def _now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
+
+
+def _dt_to_text(value: datetime | None) -> str | None:
+    return value.isoformat(timespec="seconds") if value else None
+
+
+def _text_to_dt(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def _migrate_tasks_table(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    migrations = {
+        "start_time": "ALTER TABLE tasks ADD COLUMN start_time TEXT",
+        "end_time": "ALTER TABLE tasks ADD COLUMN end_time TEXT",
+        "return_code": "ALTER TABLE tasks ADD COLUMN return_code INTEGER",
+    }
+    for column, statement in migrations.items():
+        if column not in columns:
+            conn.execute(statement)
+    conn.execute("UPDATE tasks SET status = 'committed' WHERE status = 'ready'")

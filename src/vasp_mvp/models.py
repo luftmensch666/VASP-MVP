@@ -7,7 +7,7 @@ from typing import Literal
 
 
 TaskType = Literal["relax", "static", "molecule", "adsorption"]
-TaskStatus = Literal["draft", "ready", "running", "finished", "failed"]
+TaskStatus = Literal["draft", "committed", "running", "finished", "failed", "stopped"]
 
 
 @dataclass(frozen=True)
@@ -80,6 +80,9 @@ class TaskRecord:
     created_at: datetime
     updated_at: datetime
     task_type: TaskType
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    return_code: int | None = None
 
     @property
     def path(self) -> Path:
