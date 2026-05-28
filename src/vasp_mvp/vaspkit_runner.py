@@ -172,7 +172,9 @@ def generate_vasp_inputs_with_vaspkit(request: VaspkitRequest, dry_run: bool = T
     if not check_vaspkit_available(request.vaspkit_bin):
         errors.append(f"VASPKIT executable is not available: {request.vaspkit_bin}")
     if request.uploaded_cif_path is not None:
-        shutil.copy2(request.uploaded_cif_path, draft_dir / request.uploaded_cif_path.name)
+        target_cif = draft_dir / request.uploaded_cif_path.name
+        if request.uploaded_cif_path.resolve() != target_cif.resolve():
+            shutil.copy2(request.uploaded_cif_path, target_cif)
     potcar_error = _apply_existing_potcar_policy(draft_dir, request.existing_potcar_policy, warnings)
     if potcar_error:
         errors.append(potcar_error)

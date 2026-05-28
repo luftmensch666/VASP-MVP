@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -16,16 +16,17 @@ if str(SRC) not in sys.path:
 
 from vasp_mvp.adsorption import calculate_raw_adsorption_energy
 from vasp_mvp.config import load_app_config, load_potcar_config
-from vasp_mvp.db import connect, list_tasks, update_task_status
+from vasp_mvp.db import connect, create_task, list_tasks, update_task_status
 from vasp_mvp.i18n import t
 from vasp_mvp.models import TaskDraft, TaskRecord, TaskRequest
 from vasp_mvp.parser import parse_metrics
 from vasp_mvp.renderers import build_draft
 from vasp_mvp.runner import run_dir, start_vasp, stop_task, tail_file, write_confirmed_task
 from vasp_mvp.rules import default_kpoints
-from vasp_mvp.security import safe_task_id
+from vasp_mvp.security import safe_task_id, task_dir
 from vasp_mvp.structure_io import read_structure_upload
 from vasp_mvp.vaspkit_options import get_vaspkit_section, validate_vaspkit_values
+from vasp_mvp.vaspkit_runner import VaspkitRequest, VaspkitResult, generate_vasp_inputs_with_vaspkit
 
 
 TASK_TYPES = ("relax", "static", "molecule", "adsorption")
@@ -89,13 +90,12 @@ def vaspkit_choice_label(option: dict, value: str) -> str:
     return tr(label_key) if label_key else value
 
 
-def save_vaspkit_request(payload: dict) -> Path:
-    # 这里只保存 UI 选项草稿，不调用 VASPKIT，也不创建 VASP 运行目录。
-    draft_dir = ROOT / "draft"
-    draft_dir.mkdir(parents=True, exist_ok=True)
-    target = draft_dir / "vaspkit_request.json"
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return target
+def vaspkit_task_root(config, task_id: str) -> Path:
+    return task_dir(config, safe_task_id(task_id))
+
+
+def vaspkit_draft_dir(config, task_id: str) -> Path:
+    return vaspkit_task_root(config, task_id) / "draft"
 
 
 def parse_incar_overrides(text: str) -> dict[str, str]:
@@ -358,8 +358,90 @@ def show_adsorption_table(default_ads: float | None = None) -> None:
         st.warning(tr("warning.adsorption_missing", fields=", ".join(missing)))
 
 
-def show_vaspkit_input_generator() -> None:
+def commit_vaspkit_draft(conn, request: VaspkitRequest, task_type: str) -> list[str]:
+    warnings: list[str] = []
+    source_dir = request.draft_dir
+    target_dir = run_dir(request.draft_dir.parent)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("POSCAR", "INCAR", "KPOINTS", "POTCAR"):
+        source = source_dir / filename
+        if source.exists():
+            shutil.copy2(source, target_dir / filename)
+        else:
+            warnings.append(tr("warning.vaspkit_missing_commit_file", filename=filename))
+    placeholder = source_dir / "POTCAR.placeholder"
+    if placeholder.exists() and not (source_dir / "POTCAR").exists():
+        shutil.copy2(placeholder, target_dir / "POTCAR.placeholder")
+    create_task(
+        conn,
+        task_id=request.draft_dir.parent.name,
+        project="default",
+        task_type=task_type,
+        task_root=request.draft_dir.parent,
+        status="committed",
+    )
+    return warnings
+
+
+def show_generated_file_status(result: VaspkitResult) -> None:
+    st.subheader(tr("vaspkit.generated_file_status"))
+    rows = []
+    for filename in ("POSCAR", "INCAR", "KPOINTS", "POTCAR", "POTCAR.placeholder"):
+        path = result.draft_dir / filename
+        rows.append(
+            {
+                tr("table.file"): filename,
+                tr("table.exists"): bool_label(path.exists()),
+                tr("table.size_bytes"): path.stat().st_size if path.exists() else 0,
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def show_generated_file_preview(result: VaspkitResult) -> None:
+    st.subheader(tr("vaspkit.preview_generated_files"))
+    tabs = st.tabs([tr("tabs.poscar"), tr("tabs.incar"), tr("tabs.kpoints"), tr("tabs.potcar")])
+    for tab, filename in zip(tabs[:3], ("POSCAR", "INCAR", "KPOINTS")):
+        path = result.draft_dir / filename
+        with tab:
+            if path.exists():
+                st.code(path.read_text(encoding="utf-8", errors="replace"), language="text")
+            else:
+                st.info(tr("info.file_not_generated", filename=filename))
+    with tabs[3]:
+        summary = result.potcar_summary or {}
+        st.write(
+            {
+                tr("table.exists"): bool_label(summary.get("exists")),
+                tr("table.size_bytes"): summary.get("size_bytes", 0),
+                tr("table.path"): summary.get("path", ""),
+                tr("table.titel_lines"): summary.get("titel_lines", []),
+            }
+        )
+        if not summary.get("exists"):
+            st.warning(tr("warning.potcar_not_generated"))
+        st.caption(tr("vaspkit.potcar_no_full_preview"))
+
+
+def show_vaspkit_input_generator(config, conn) -> None:
     st.subheader(tr("vaspkit.generator.title"))
+    task_id = st.text_input(
+        tr("sidebar.task_id"),
+        f"vaspkit-{datetime.utcnow():%Y%m%d-%H%M%S}",
+        key="vaspkit_task_id",
+    )
+    task_type = st.selectbox(
+        tr("sidebar.task_type"),
+        TASK_TYPES,
+        format_func=task_type_label,
+        key="vaspkit_task_type",
+    )
+    vaspkit_bin = st.text_input(
+        tr("vaspkit.bin.label"),
+        "vaspkit",
+        help=tr("vaspkit.bin.help"),
+    )
+    vaspkit_dry_run = st.checkbox(tr("sidebar.dry_run"), value=True, key="vaspkit_dry_run")
 
     uploaded_cif_option = vaspkit_option("poscar", "uploaded_cif")
     uploaded_cif = st.file_uploader(
@@ -462,8 +544,6 @@ def show_vaspkit_input_generator() -> None:
     )
 
     request = {
-        "created_at": datetime.utcnow().isoformat(timespec="seconds"),
-        "generation_mode": generation_mode,
         "poscar": {
             "uploaded_cif": None
             if uploaded_cif is None
@@ -487,12 +567,21 @@ def show_vaspkit_input_generator() -> None:
     }
 
     if st.button(tr("button.generate_vaspkit_draft"), type="primary"):
+        safe_id = safe_task_id(task_id)
+        draft_dir = vaspkit_draft_dir(config, safe_id)
+        draft_dir.mkdir(parents=True, exist_ok=True)
+        uploaded_cif_path = None
+        if uploaded_cif is not None:
+            uploaded_name = Path(uploaded_cif.name).name
+            uploaded_cif_path = draft_dir / uploaded_name
+            uploaded_cif_path.write_bytes(uploaded_cif.getvalue())
+
         validation_errors = []
         validation_errors.extend(
             validate_vaspkit_values(
                 "poscar",
                 {
-                    "uploaded_cif": request["poscar"]["uploaded_cif"],
+                    "uploaded_cif": request["poscar"]["uploaded_cif"] or uploaded_cif_path,
                     "element_order_mode": element_order_mode,
                     "custom_element_order": custom_element_order,
                 },
@@ -504,10 +593,54 @@ def show_vaspkit_input_generator() -> None:
         if validation_errors:
             st.error(tr("error.vaspkit_validation", errors="; ".join(validation_errors)))
         else:
-            saved_path = save_vaspkit_request(request)
-            st.success(tr("success.vaspkit_draft_saved", path=saved_path))
-            st.subheader(tr("vaspkit.json_preview"))
-            st.json(request)
+            vaspkit_request = VaspkitRequest(
+                vaspkit_bin=vaspkit_bin,
+                draft_dir=draft_dir,
+                uploaded_cif_path=uploaded_cif_path,
+                generation_mode=generation_mode,
+                element_order_mode=element_order_mode,
+                custom_element_order=custom_element_order,
+                incar_key_parameters=[common_incar_key],
+                incar_custom_key_string=incar_custom_key_string,
+                kmesh_scheme=kmesh_scheme,
+                kmesh_resolved_value=float(kmesh_resolved_value),
+                potcar_mode=potcar_mode,
+                existing_potcar_policy=existing_potcar_policy,
+            )
+            result = generate_vasp_inputs_with_vaspkit(vaspkit_request, dry_run=vaspkit_dry_run)
+            st.session_state["vaspkit_request"] = vaspkit_request
+            st.session_state["vaspkit_result"] = result
+            st.session_state["vaspkit_commit_task_type"] = task_type
+            if result.ok:
+                st.success(tr("success.vaspkit_draft_saved", path=result.request_path))
+            else:
+                st.error(tr("error.vaspkit_generation_failed", errors="; ".join(result.errors)))
+
+    result = st.session_state.get("vaspkit_result")
+    request_obj = st.session_state.get("vaspkit_request")
+    if result:
+        st.subheader(tr("vaspkit.output_logs"))
+        logs = st.tabs([tr("tabs.vaspkit_out"), tr("tabs.vaspkit_err")])
+        logs[0].code(tail_file(result.stdout_path), language="text")
+        err_text = tail_file(result.stderr_path)
+        if err_text:
+            logs[1].code(err_text, language="text")
+        else:
+            logs[1].info(tr("info.no_stderr"))
+        show_generated_file_status(result)
+        show_generated_file_preview(result)
+        st.subheader(tr("vaspkit.json_preview"))
+        if result.request_path.exists():
+            st.json(result.request_path.read_text(encoding="utf-8"))
+        if result.warnings:
+            st.warning("; ".join(result.warnings))
+        if result.errors:
+            st.error("; ".join(result.errors))
+        if st.button(tr("button.confirm_commit_vaspkit"), disabled=not result.ok or request_obj is None):
+            warnings = commit_vaspkit_draft(conn, request_obj, st.session_state.get("vaspkit_commit_task_type", "static"))
+            if warnings:
+                st.warning("; ".join(warnings))
+            st.success(tr("success.vaspkit_committed", path=run_dir(request_obj.draft_dir.parent)))
 
 
 def show_workflow_page(config, potcars, conn) -> None:
@@ -546,7 +679,7 @@ def main() -> None:
     with workflow_tab:
         show_workflow_page(config, potcars, conn)
     with vaspkit_tab:
-        show_vaspkit_input_generator()
+        show_vaspkit_input_generator(config, conn)
 
 
 if __name__ == "__main__":
