@@ -1,0 +1,344 @@
+## 生成POSCAR 
+
+(vaspkit-pyenv) root@debian:~/hyq/vaspkit-workspace# vaspkit
+ 
+ 
+            \\\///         
+           / _  _ \         Hey, you must know what you are doing.
+         (| (o)(o) |)       Otherwise you might get wrong results.
+ +-----.OOOo--()--oOOO.------------------------------------------+
+ |         VASPKIT Standard Edition 1.3.5 (03 Jul. 2022)         |
+ |         Core Developer: Vei WANG (wangvei@icloud.com)         |
+ |     Main Contributors: Nan XU, Jin-Cheng LIU & Gang TANG      |
+ |  Online Tutorials Available on Website: https://vaspkit.com   |
+ +-----.oooO-----------------------------------------------------+
+        (   )   Oooo.                          VASPKIT Made Simple
+         \ (    (   )     
+          \_)    ) /      
+                (_/       
+ ===================== Structural Utilities ======================
+ 1)  VASP Input-Files Kit          2)  Mechanical Properties      
+ 3)  K-Path for Band-Structure     4)  Structure Editor           
+ 5)  Catalysis-ElectroChem Kit     6)  Symmetry Analysis          
+ 8)  Advanced Structure Models  
+ ===================== Electronic Utilities ======================
+ 11) Density-of-States             21) Band-Structure             
+ 23) 3D Band-Structure             25) Hybrid-DFT Band-Structure  
+ 26) Fermi-Surface                 28) Band-Structure Unfolding   
+ 31) Charge-Density Analysis       42) Potential Analysis         
+ 51) Wave-Function Analysis        62) Magnetic Properties        
+ 65) Spin-Texture                  68) Transport Properties       
+ ======================== Misc Utilities =========================
+ 71) Optical Properties            72) Molecular-Dynamics Kit     
+ 74) User Interface                78) VASP2other Interface       
+ 91) Semiconductor Kit             92) 2D-Material Kit            
+ 0)  Quit                                                         
+ ------------>>
+1  
+ ==================== VASP Input Files Options ===================
+ 101) Customize INCAR File                                        
+ 102) Generate KPOINTS File for SCF Calculation                   
+ 103) Generate POTCAR File with Default Setting                   
+ 104) Generate POTCAR File with User Specified Potential          
+ 105) Generate POSCAR File from cif (no fractional occupations)   
+ 106) Generate POSCAR File from Material Studio xsd (retain fixes)
+ 107) Reformat POSCAR File in Specified Order of Elements         
+ 108) Successive Procedure to Generate VASP Files and Check       
+ 109) Submit Job Queue                                            
+                                                                  
+ 0)   Quit                                                        
+ 9)   Back                                                        
+ ------------>>
+105
+ Input the filename in cif format (e.g., POSCAR.cif):
+ ------------>>
+CePO4.cif
+Pleas input the order of element, `ENTER` for default!
+Example: 'O Ce P' in this CIF
+
+ -->> (01) Written POSCAR file!
+ +---------------------------------------------------------------+
+ |                       * ACKNOWLEDGMENTS *                     |
+ | Other Contributors (in no particular order): Peng-Fei LIU,    |
+ | Xue-Fei LIU, Dao-Xiong WU, Zhao-Fu ZHANG, Tian WANG, Qiang LI,|
+ | Ya-Chao LIU, Jiang-Shan ZHAO, Qi-Jing ZHENG, Yue QIU and You! |
+ | Advisors: Wen-Tong GENG, Yoshiyuki KAWAZOE                    |
+ | Any Suggestions for Improvement are Welcome and Appreciated!  |
+ +---------------------------------------------------------------+
+ |                          * CITATIONS *                        |
+ | When using VASPKIT in your research PLEASE cite the paper:    |
+ | [1] V. WANG, N. XU, J.-C. LIU, G. TANG, W.-T. GENG, VASPKIT: A|
+ | User-Friendly Interface Facilitating High-Throughput Computing|
+ | and Analysis Using VASP Code, Computer Physics Communications |
+ | 267, 108033, (2021), DOI: 10.1016/j.cpc.2021.108033           |
+ +---------------------------------------------------------------+
+
+
+## 生成KPOINTS
+
+(vaspkit-pyenv) root@debian:~/hyq/vaspkit-workspace# vaspkit 
+ 
+ 
+            \\\///         
+           / _  _ \         Hey, you must know what you are doing.
+         (| (o)(o) |)       Otherwise you might get wrong results.
+ +-----.OOOo--()--oOOO.------------------------------------------+
+ |         VASPKIT Standard Edition 1.3.5 (03 Jul. 2022)         |
+ |         Core Developer: Vei WANG (wangvei@icloud.com)         |
+ |     Main Contributors: Nan XU, Jin-Cheng LIU & Gang TANG      |
+ |  Online Tutorials Available on Website: https://vaspkit.com   |
+ +-----.oooO-----------------------------------------------------+
+        (   )   Oooo.                          VASPKIT Made Simple
+         \ (    (   )     
+          \_)    ) /      
+                (_/       
+ ===================== Structural Utilities ======================
+ 1)  VASP Input-Files Kit          2)  Mechanical Properties      
+ 3)  K-Path for Band-Structure     4)  Structure Editor           
+ 5)  Catalysis-ElectroChem Kit     6)  Symmetry Analysis          
+ 8)  Advanced Structure Models  
+ ===================== Electronic Utilities ======================
+ 11) Density-of-States             21) Band-Structure             
+ 23) 3D Band-Structure             25) Hybrid-DFT Band-Structure  
+ 26) Fermi-Surface                 28) Band-Structure Unfolding   
+ 31) Charge-Density Analysis       42) Potential Analysis         
+ 51) Wave-Function Analysis        62) Magnetic Properties        
+ 65) Spin-Texture                  68) Transport Properties       
+ ======================== Misc Utilities =========================
+ 71) Optical Properties            72) Molecular-Dynamics Kit     
+ 74) User Interface                78) VASP2other Interface       
+ 91) Semiconductor Kit             92) 2D-Material Kit            
+ 0)  Quit                                                         
+ ------------>>
+1
+ ==================== VASP Input Files Options ===================
+ 101) Customize INCAR File                                        
+ 102) Generate KPOINTS File for SCF Calculation                   
+ 103) Generate POTCAR File with Default Setting                   
+ 104) Generate POTCAR File with User Specified Potential          
+ 105) Generate POSCAR File from cif (no fractional occupations)   
+ 106) Generate POSCAR File from Material Studio xsd (retain fixes)
+ 107) Reformat POSCAR File in Specified Order of Elements         
+ 108) Successive Procedure to Generate VASP Files and Check       
+ 109) Submit Job Queue                                            
+                                                                  
+ 0)   Quit                                                        
+ 9)   Back                                                        
+ ------------>>
+102
+ ======================== K-Mesh Scheme ==========================
+ 1) Monkhorst-Pack Scheme                                         
+ 2) Gamma Scheme                                                  
+ 3) Irreducible K-Points with Gamma Scheme                        
+                                                                  
+ 0)   Quit                                                        
+ 9)   Back                                                        
+ ------------->>
+1
+ -->> (01) Reading Structural Parameters from POSCAR File...
+ +-------------------------- Warm Tips --------------------------+
+   * Accuracy Levels: Gamma-Only: 0;              
+                      Low: 0.06~0.04;             
+                      Medium: 0.04~0.03;          
+                      Fine: 0.02-0.01.            
+   * 0.03-0.04 is Generally Precise Enough!                
+ +---------------------------------------------------------------+
+ Input Kmesh-Resolved Value (in Units of 2*PI/Angstrom): 
+ ------------>>
+0.04
+ +-------------------------- Summary ----------------------------+
+ Reciprocal Lattice Vectors (in Units of 1/Angstrom):
+       0.4738414723       0.0000000000       0.0000000000
+       0.0000000000       0.4519561873       0.0000000000
+       0.0000000000       0.0000000000       0.2513274123
+ Reciprocal Lattice Constants:   0.4738   0.4520   0.2513
+ Real-Space Lattice Constants:  13.2601  13.9022  25.0000
+ K-Mesh Size:    2    2    1
+ +---------------------------------------------------------------+
+ -->> (02) Written KPOINTS File!
+ -->> (03) Written INCAR file!
+ +-------------------------- Summary ----------------------------+
+ POTCAR Type: PBE
+ Number of Elements: 3
+ POTCAR File No.1: [ POTCAR_O ], Valence Electron: 6.0
+ POTCAR File No.2: [ POTCAR_Ce ], Valence Electron: 12.0
+ POTCAR File No.3: [ POTCAR_P ], Valence Electron: 5.0
+ Total Atoms: 84
+ Total Valence Electrons: 574.0
+ +---------------------------------------------------------------+
+ -->> (04) Written POTCAR File with the Recommended Potential!
+ +---------------------------------------------------------------+
+ |                       * ACKNOWLEDGMENTS *                     |
+ | Other Contributors (in no particular order): Peng-Fei LIU,    |
+ | Xue-Fei LIU, Dao-Xiong WU, Zhao-Fu ZHANG, Tian WANG, Qiang LI,|
+ | Ya-Chao LIU, Jiang-Shan ZHAO, Qi-Jing ZHENG, Yue QIU and You! |
+ | Advisors: Wen-Tong GENG, Yoshiyuki KAWAZOE                    |
+ | Any Suggestions for Improvement are Welcome and Appreciated!  |
+ +---------------------------------------------------------------+
+ |                          * CITATIONS *                        |
+ | When using VASPKIT in your research PLEASE cite the paper:    |
+ | [1] V. WANG, N. XU, J.-C. LIU, G. TANG, W.-T. GENG, VASPKIT: A|
+ | User-Friendly Interface Facilitating High-Throughput Computing|
+ | and Analysis Using VASP Code, Computer Physics Communications |
+ | 267, 108033, (2021), DOI: 10.1016/j.cpc.2021.108033           |
+ +---------------------------------------------------------------+
+
+## 生成POTCAR
+(vaspkit-pyenv) root@debian:~/hyq/vaspkit-workspace# vaspkit 
+ 
+ 
+            \\\///         
+           / _  _ \         Hey, you must know what you are doing.
+         (| (o)(o) |)       Otherwise you might get wrong results.
+ +-----.OOOo--()--oOOO.------------------------------------------+
+ |         VASPKIT Standard Edition 1.3.5 (03 Jul. 2022)         |
+ |         Core Developer: Vei WANG (wangvei@icloud.com)         |
+ |     Main Contributors: Nan XU, Jin-Cheng LIU & Gang TANG      |
+ |  Online Tutorials Available on Website: https://vaspkit.com   |
+ +-----.oooO-----------------------------------------------------+
+        (   )   Oooo.                          VASPKIT Made Simple
+         \ (    (   )     
+          \_)    ) /      
+                (_/       
+ ===================== Structural Utilities ======================
+ 1)  VASP Input-Files Kit          2)  Mechanical Properties      
+ 3)  K-Path for Band-Structure     4)  Structure Editor           
+ 5)  Catalysis-ElectroChem Kit     6)  Symmetry Analysis          
+ 8)  Advanced Structure Models  
+ ===================== Electronic Utilities ======================
+ 11) Density-of-States             21) Band-Structure             
+ 23) 3D Band-Structure             25) Hybrid-DFT Band-Structure  
+ 26) Fermi-Surface                 28) Band-Structure Unfolding   
+ 31) Charge-Density Analysis       42) Potential Analysis         
+ 51) Wave-Function Analysis        62) Magnetic Properties        
+ 65) Spin-Texture                  68) Transport Properties       
+ ======================== Misc Utilities =========================
+ 71) Optical Properties            72) Molecular-Dynamics Kit     
+ 74) User Interface                78) VASP2other Interface       
+ 91) Semiconductor Kit             92) 2D-Material Kit            
+ 0)  Quit                                                         
+ ------------>>
+1
+ ==================== VASP Input Files Options ===================
+ 101) Customize INCAR File                                        
+ 102) Generate KPOINTS File for SCF Calculation                   
+ 103) Generate POTCAR File with Default Setting                   
+ 104) Generate POTCAR File with User Specified Potential          
+ 105) Generate POSCAR File from cif (no fractional occupations)   
+ 106) Generate POSCAR File from Material Studio xsd (retain fixes)
+ 107) Reformat POSCAR File in Specified Order of Elements         
+ 108) Successive Procedure to Generate VASP Files and Check       
+ 109) Submit Job Queue                                            
+                                                                  
+ 0)   Quit                                                        
+ 9)   Back                                                        
+ ------------>>
+103
+ -->> (01) The POTCAR file already exists and skip the process.
+ +---------------------------------------------------------------+
+ |                       * ACKNOWLEDGMENTS *                     |
+ | Other Contributors (in no particular order): Peng-Fei LIU,    |
+ | Xue-Fei LIU, Dao-Xiong WU, Zhao-Fu ZHANG, Tian WANG, Qiang LI,|
+ | Ya-Chao LIU, Jiang-Shan ZHAO, Qi-Jing ZHENG, Yue QIU and You! |
+ | Advisors: Wen-Tong GENG, Yoshiyuki KAWAZOE                    |
+ | Any Suggestions for Improvement are Welcome and Appreciated!  |
+ +---------------------------------------------------------------+
+ |                          * CITATIONS *                        |
+ | When using VASPKIT in your research PLEASE cite the paper:    |
+ | [1] V. WANG, N. XU, J.-C. LIU, G. TANG, W.-T. GENG, VASPKIT: A|
+ | User-Friendly Interface Facilitating High-Throughput Computing|
+ | and Analysis Using VASP Code, Computer Physics Communications |
+ | 267, 108033, (2021), DOI: 10.1016/j.cpc.2021.108033           |
+ +---------------------------------------------------------------+
+
+## 生成 INCAR
+(vaspkit-pyenv) root@debian:~/hyq/vaspkit-workspace# vaspkit 
+ 
+ 
+            \\\///         
+           / _  _ \         Hey, you must know what you are doing.
+         (| (o)(o) |)       Otherwise you might get wrong results.
+ +-----.OOOo--()--oOOO.------------------------------------------+
+ |         VASPKIT Standard Edition 1.3.5 (03 Jul. 2022)         |
+ |         Core Developer: Vei WANG (wangvei@icloud.com)         |
+ |     Main Contributors: Nan XU, Jin-Cheng LIU & Gang TANG      |
+ |  Online Tutorials Available on Website: https://vaspkit.com   |
+ +-----.oooO-----------------------------------------------------+
+        (   )   Oooo.                          VASPKIT Made Simple
+         \ (    (   )     
+          \_)    ) /      
+                (_/       
+ ===================== Structural Utilities ======================
+ 1)  VASP Input-Files Kit          2)  Mechanical Properties      
+ 3)  K-Path for Band-Structure     4)  Structure Editor           
+ 5)  Catalysis-ElectroChem Kit     6)  Symmetry Analysis          
+ 8)  Advanced Structure Models  
+ ===================== Electronic Utilities ======================
+ 11) Density-of-States             21) Band-Structure             
+ 23) 3D Band-Structure             25) Hybrid-DFT Band-Structure  
+ 26) Fermi-Surface                 28) Band-Structure Unfolding   
+ 31) Charge-Density Analysis       42) Potential Analysis         
+ 51) Wave-Function Analysis        62) Magnetic Properties        
+ 65) Spin-Texture                  68) Transport Properties       
+ ======================== Misc Utilities =========================
+ 71) Optical Properties            72) Molecular-Dynamics Kit     
+ 74) User Interface                78) VASP2other Interface       
+ 91) Semiconductor Kit             92) 2D-Material Kit            
+ 0)  Quit                                                         
+ ------------>>
+1
+ ==================== VASP Input Files Options ===================
+ 101) Customize INCAR File                                        
+ 102) Generate KPOINTS File for SCF Calculation                   
+ 103) Generate POTCAR File with Default Setting                   
+ 104) Generate POTCAR File with User Specified Potential          
+ 105) Generate POSCAR File from cif (no fractional occupations)   
+ 106) Generate POSCAR File from Material Studio xsd (retain fixes)
+ 107) Reformat POSCAR File in Specified Order of Elements         
+ 108) Successive Procedure to Generate VASP Files and Check       
+ 109) Submit Job Queue                                            
+                                                                  
+ 0)   Quit                                                        
+ 9)   Back                                                        
+ ------------>>
+101
+ +-------------------------- Warm Tips --------------------------+
+                You MUST Know What You Are doing
+  Some Parameters in INCAR File Neet To Be Set/Adjusted Manually      
+ +---------------------------------------------------------------+
+ ======================== INCAR Options ==========================
+ ST) Static-Calculation            SR) Standard Relaxation        
+ MG) Magnetic Properties           SO) Spin-Orbit Coupling         
+ D3) DFT-D3 no-damping Correction  H6) HSE06 Calculation         
+ PU) DFT+U Calculation             MD) Molecular Dynamics        
+ GW) GW0 Calculation               BS) BSE Calculation  
+ DC) Elastic Constant              EL) ELF Calculation       
+ BD) Bader Charge Analysis         OP) Optical Properties        
+ EC) Static Dielectric Constant    PC) Decomposed Charge Density   
+ FD) Phonon-Finite-Displacement    DT) Phonon-DFPT            
+ NE) Nudged Elastic Band (NEB)     DM) The Dimer Method             
+ FQ) Frequence Calculations        LR) Lattice Relaxation          
+ 
+ 0)   Quit                                                       
+ 9)   Back      
+ ------------>>
+ Input Key-Parameters (STH6D3 means HSE06-D3 Static-Calcualtion)
+SR
+ -->> (01) Written INCAR file!
+ +---------------------------------------------------------------+
+ |                       * ACKNOWLEDGMENTS *                     |
+ | Other Contributors (in no particular order): Peng-Fei LIU,    |
+ | Xue-Fei LIU, Dao-Xiong WU, Zhao-Fu ZHANG, Tian WANG, Qiang LI,|
+ | Ya-Chao LIU, Jiang-Shan ZHAO, Qi-Jing ZHENG, Yue QIU and You! |
+ | Advisors: Wen-Tong GENG, Yoshiyuki KAWAZOE                    |
+ | Any Suggestions for Improvement are Welcome and Appreciated!  |
+ +---------------------------------------------------------------+
+ |                          * CITATIONS *                        |
+ | When using VASPKIT in your research PLEASE cite the paper:    |
+ | [1] V. WANG, N. XU, J.-C. LIU, G. TANG, W.-T. GENG, VASPKIT: A|
+ | User-Friendly Interface Facilitating High-Throughput Computing|
+ | and Analysis Using VASP Code, Computer Physics Communications |
+ | 267, 108033, (2021), DOI: 10.1016/j.cpc.2021.108033           |
+ +---------------------------------------------------------------+
+
+
