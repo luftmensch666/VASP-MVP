@@ -1,0 +1,170 @@
+{
+  "version": 1,
+  "source": "docs/vaspkit/vaspkit_generation_record.txt",
+  "sections": {
+    "poscar": {
+      "label_key": "vaspkit.section.poscar.label",
+      "help_key": "vaspkit.section.poscar.help",
+      "options": [
+        {
+          "key": "uploaded_cif",
+          "type": "file",
+          "default": null,
+          "choices": [],
+          "label_key": "vaspkit.option.uploaded_cif.label",
+          "help_key": "vaspkit.option.uploaded_cif.help",
+          "required": true
+        },
+        {
+          "key": "element_order_mode",
+          "type": "select",
+          "default": "default",
+          "choices": ["default", "custom"],
+          "choice_label_keys": {
+            "default": "vaspkit.choice.element_order_mode.default",
+            "custom": "vaspkit.choice.element_order_mode.custom"
+          },
+          "label_key": "vaspkit.option.element_order_mode.label",
+          "help_key": "vaspkit.option.element_order_mode.help",
+          "required": true
+        },
+        {
+          "key": "custom_element_order",
+          "type": "text",
+          "default": "",
+          "choices": [],
+          "label_key": "vaspkit.option.custom_element_order.label",
+          "help_key": "vaspkit.option.custom_element_order.help",
+          "required": false
+        }
+      ]
+    },
+    "kpoints": {
+      "label_key": "vaspkit.section.kpoints.label",
+      "help_key": "vaspkit.section.kpoints.help",
+      "options": [
+        {
+          "key": "kmesh_scheme",
+          "type": "select",
+          "default": "1",
+          "choices": ["1", "2", "3"],
+          "choice_label_keys": {
+            "1": "vaspkit.choice.kmesh_scheme.1",
+            "2": "vaspkit.choice.kmesh_scheme.2",
+            "3": "vaspkit.choice.kmesh_scheme.3"
+          },
+          "label_key": "vaspkit.option.kmesh_scheme.label",
+          "help_key": "vaspkit.option.kmesh_scheme.help",
+          "required": true
+        },
+        {
+          "key": "kmesh_resolved_value",
+          "type": "number",
+          "default": 0.04,
+          "choices": [],
+          "label_key": "vaspkit.option.kmesh_resolved_value.label",
+          "help_key": "vaspkit.option.kmesh_resolved_value.help",
+          "required": true
+        },
+        {
+          "key": "accuracy_preset",
+          "type": "select",
+          "default": "medium",
+          "choices": ["gamma_only", "low", "medium", "fine", "custom"],
+          "choice_label_keys": {
+            "gamma_only": "vaspkit.choice.accuracy_preset.gamma_only",
+            "low": "vaspkit.choice.accuracy_preset.low",
+            "medium": "vaspkit.choice.accuracy_preset.medium",
+            "fine": "vaspkit.choice.accuracy_preset.fine",
+            "custom": "vaspkit.choice.accuracy_preset.custom"
+          },
+          "label_key": "vaspkit.option.accuracy_preset.label",
+          "help_key": "vaspkit.option.accuracy_preset.help",
+          "required": true
+        }
+      ]
+    },
+    "potcar": {
+      "label_key": "vaspkit.section.potcar.label",
+      "help_key": "vaspkit.section.potcar.help",
+      "options": [
+        {
+          "key": "potcar_mode",
+          "type": "select",
+          "default": "103",
+          "choices": ["103", "104"],
+          "choice_label_keys": {
+            "103": "vaspkit.choice.potcar_mode.103",
+            "104": "vaspkit.choice.potcar_mode.104"
+          },
+          "label_key": "vaspkit.option.potcar_mode.label",
+          "help_key": "vaspkit.option.potcar_mode.help",
+          "required": true
+        },
+        {
+          "key": "existing_potcar_policy",
+          "type": "select",
+          "default": "skip",
+          "choices": ["skip", "backup_and_regenerate", "error"],
+          "choice_label_keys": {
+            "skip": "vaspkit.choice.existing_potcar_policy.skip",
+            "backup_and_regenerate": "vaspkit.choice.existing_potcar_policy.backup_and_regenerate",
+            "error": "vaspkit.choice.existing_potcar_policy.error"
+          },
+          "label_key": "vaspkit.option.existing_potcar_policy.label",
+          "help_key": "vaspkit.option.existing_potcar_policy.help",
+          "required": true
+        }
+      ]
+    },
+    "incar": {
+      "label_key": "vaspkit.section.incar.label",
+      "help_key": "vaspkit.section.incar.help",
+      "options": [
+        {
+          "key": "incar_key_parameters",
+          "type": "multiselect",
+          "default": ["SR"],
+          "choices": ["ST", "SR", "MG", "SO", "D3", "H6", "PU", "MD", "GW", "BS", "DC", "EL", "BD", "OP", "EC", "PC", "FD", "DT", "NE", "DM", "FQ", "LR"],
+          "choice_label_keys": {
+            "ST": "vaspkit.choice.incar_key.ST",
+            "SR": "vaspkit.choice.incar_key.SR",
+            "MG": "vaspkit.choice.incar_key.MG",
+            "SO": "vaspkit.choice.incar_key.SO",
+            "D3": "vaspkit.choice.incar_key.D3",
+            "H6": "vaspkit.choice.incar_key.H6",
+            "PU": "vaspkit.choice.incar_key.PU",
+            "MD": "vaspkit.choice.incar_key.MD",
+            "GW": "vaspkit.choice.incar_key.GW",
+            "BS": "vaspkit.choice.incar_key.BS",
+            "DC": "vaspkit.choice.incar_key.DC",
+            "EL": "vaspkit.choice.incar_key.EL",
+            "BD": "vaspkit.choice.incar_key.BD",
+            "OP": "vaspkit.choice.incar_key.OP",
+            "EC": "vaspkit.choice.incar_key.EC",
+            "PC": "vaspkit.choice.incar_key.PC",
+            "FD": "vaspkit.choice.incar_key.FD",
+            "DT": "vaspkit.choice.incar_key.DT",
+            "NE": "vaspkit.choice.incar_key.NE",
+            "DM": "vaspkit.choice.incar_key.DM",
+            "FQ": "vaspkit.choice.incar_key.FQ",
+            "LR": "vaspkit.choice.incar_key.LR"
+          },
+          "label_key": "vaspkit.option.incar_key_parameters.label",
+          "help_key": "vaspkit.option.incar_key_parameters.help",
+          "required": true
+        },
+        {
+          "key": "incar_custom_key_string",
+          "type": "text",
+          "default": "",
+          "choices": [],
+          "label_key": "vaspkit.option.incar_custom_key_string.label",
+          "help_key": "vaspkit.option.incar_custom_key_string.help",
+          "required": false,
+          "pattern": "^(ST|SR|MG|SO|D3|H6|PU|MD|GW|BS|DC|EL|BD|OP|EC|PC|FD|DT|NE|DM|FQ|LR)*$"
+        }
+      ]
+    }
+  }
+}
