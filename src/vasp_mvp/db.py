@@ -36,6 +36,36 @@ CREATE TABLE IF NOT EXISTS metrics (
 );
 """
 
+INPUT_SETS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS input_sets (
+    input_set_id TEXT PRIMARY KEY,
+    name TEXT,
+    source TEXT,
+    status TEXT,
+    usable_for_vasp INTEGER,
+    root_dir TEXT,
+    incar_path TEXT,
+    poscar_path TEXT,
+    kpoints_path TEXT,
+    potcar_path TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    notes TEXT
+);
+"""
+
+TASK_INPUT_SETS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS task_input_sets (
+    task_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    input_set_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, role),
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+    FOREIGN KEY(input_set_id) REFERENCES input_sets(input_set_id)
+);
+"""
+
 
 def db_path(workspace: Path) -> Path:
     workspace = Path(workspace)
@@ -48,6 +78,8 @@ def init_db(workspace: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute(TASKS_SCHEMA)
     conn.execute(METRICS_SCHEMA)
+    conn.execute(INPUT_SETS_SCHEMA)
+    conn.execute(TASK_INPUT_SETS_SCHEMA)
     _migrate_tasks_table(conn)
     conn.commit()
     return conn

@@ -28,6 +28,8 @@ class DbTest(unittest.TestCase):
             }
             self.assertIn("tasks", tables)
             self.assertIn("metrics", tables)
+            self.assertIn("input_sets", tables)
+            self.assertIn("task_input_sets", tables)
 
     def test_create_update_list_and_save_metrics(self) -> None:
         with TemporaryDirectory() as tmp:

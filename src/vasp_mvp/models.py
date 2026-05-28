@@ -8,6 +8,9 @@ from typing import Literal
 
 TaskType = Literal["relax", "static", "molecule", "adsorption"]
 TaskStatus = Literal["draft", "committed", "running", "finished", "failed", "stopped"]
+InputSetSource = Literal["vaspkit", "manual", "imported"]
+InputSetStatus = Literal["dry_run", "generated", "edited", "validated", "committed", "invalid"]
+InputSetRole = Literal["primary", "adsorbed", "clean_slab", "molecule_ref"]
 
 
 @dataclass(frozen=True)
@@ -87,3 +90,28 @@ class TaskRecord:
     @property
     def path(self) -> Path:
         return self.task_root
+
+
+@dataclass(frozen=True)
+class InputSet:
+    input_set_id: str
+    name: str
+    source: InputSetSource
+    status: InputSetStatus
+    usable_for_vasp: bool
+    root_dir: Path
+    incar_path: Path
+    poscar_path: Path
+    kpoints_path: Path
+    potcar_path: Path
+    created_at: datetime
+    updated_at: datetime
+    notes: str = ""
+
+
+@dataclass(frozen=True)
+class TaskInputSet:
+    task_id: str
+    role: InputSetRole
+    input_set_id: str
+    created_at: datetime
