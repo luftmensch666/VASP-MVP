@@ -42,65 +42,122 @@ Codex must not:
 - use shell=True in subprocess calls;
 - rewrite the whole project when a small patch is enough.
 
-## VASPKIT input generation rules
+## VASPKIT integration requirements
 
-The system should use VASPKIT as the preferred generator for VASP input files when the user uploads CIF files.
+The system should use VASPKIT as the preferred backend for generating VASP input files from CIF files.
 
-Target workflow:
+Target flow:
 
 1. User uploads a CIF file.
-2. The system writes the CIF file into a draft workspace.
-3. The system calls VASPKIT to generate:
-   - POSCAR from CIF
+2. Backend creates a draft directory.
+3. Backend runs VASPKIT in the draft directory.
+4. VASPKIT generates:
+   - POSCAR
    - INCAR
    - KPOINTS
    - POTCAR
-4. The generated files remain in draft state.
-5. The user must preview and confirm them before the files are committed into a runnable VASP task directory.
+5. Generated files stay in draft/ first.
+6. User previews and confirms the files.
+7. Only after confirmation, files are copied into run/.
+8. VASP must never start automatically after VASPKIT generation.
 
-Important rules:
+The VASPKIT menu tasks currently required are based on docs/vaspkit/vaspkit_generation_record.txt:
 
-- Do not bypass the draft preview and manual confirmation step.
-- Do not modify the VASP installation directory.
-- Do not modify the POTCAR library.
-- Do not commit POTCAR to git.
-- Do not use shell=True for subprocess.
-- Do not use shell pipes such as echo ... | vaspkit in Python code.
-- Use subprocess.run([...], input="...", text=True, cwd=...) when interactive VASPKIT input is required.
-- Capture VASPKIT stdout/stderr into log files.
-- If VASPKIT fails, show the error log in the UI and do not create a runnable task.
-- VASPKIT-generated INCAR must still be editable and explainable in the UI.
-- The system must check POSCAR/POTCAR element order after VASPKIT generation.
+- Main menu: 1, VASP Input-Files Kit
+- 101: Customize INCAR File
+- 102: Generate KPOINTS File for SCF Calculation
+- 103: Generate POTCAR File with Default Setting
+- 104: Generate POTCAR File with User Specified Potential
+- 105: Generate POSCAR File from cif
+- 108: Successive Procedure to Generate VASP Files and Check, reserved for future use
 
-Suggested VASPKIT task IDs:
-- 105: Generate POSCAR file from CIF
-- 101: Customize INCAR file
-- 102: Generate KPOINTS file for SCF calculation
-- 103: Generate POTCAR file with default setting
-- 104: Generate POTCAR file with user specified potential
-- 108: Successive procedure to generate VASP files and check
+The UI must expose all user-customizable options shown in the test record, including:
 
-The implementation should wrap VASPKIT in a dedicated Python module, not scatter VASPKIT calls inside app.py.
+- CIF filename upload
+- POSCAR element order
+- KPOINTS scheme:
+  - Monkhorst-Pack
+  - Gamma
+  - Irreducible K-Points with Gamma
+- Kmesh-resolved value, such as 0.04
+- INCAR key-parameter string, such as SR, ST, STH6D3, PU, BD, NE, etc.
+- POTCAR mode:
+  - default recommended potential
+  - user-specified potential, reserved for future support
 
-## Bilingual UI / i18n rules
+POTCAR safety rules:
 
-The UI must support Chinese and English switching.
+- POTCAR must be generated only from the local licensed pseudopotential library through VASPKIT or a verified local POTPAW path.
+- Never display the full POTCAR content in UI.
+- Never commit POTCAR to git.
+- Never upload POTCAR anywhere.
+- Only show:
+  - whether POTCAR exists
+  - file size
+  - TITEL lines
+  - element/potential order
 
-Required behavior:
+## Bilingual UI requirements
 
-1. Add a language switch button or segmented control in the sidebar.
-2. Support at least:
-   - zh_CN
-   - en_US
-3. All Streamlit-visible text must go through an i18n helper function.
-4. Do not hardcode UI labels directly in app.py after i18n is introduced.
-5. Add or update both Chinese and English translation files whenever UI text changes.
-6. If a translation key is missing, show the key itself and report it in diagnostics.
-7. New future UI features must include both Chinese and English text at the same time.
+The whole UI must support Chinese and English.
+
+There must be a language switcher in the UI:
+
+- 中文
+- English
+
+All future UI text must use a translation helper, for example:
+
+- t("app.title")
+- t("vaspkit.generate_inputs")
+- t("vaspkit.kpoints.kmesh_help")
+- t("task.status.running")
+
+Do not write user-facing text directly in app.py or component files.
+
+Bilingual content must include:
+
+- Page titles
+- Buttons
+- Labels
+- Help text
+- Error messages
+- Warnings
+- VASPKIT option explanations
+- INCAR/KPOINTS/POTCAR/POSCAR parameter explanations
+- Diagnostics messages
+- Result table column names
 
 Recommended files:
 
 - src/vasp_mvp/i18n.py
-- locales/zh_CN.json
-- locales/en_US.json
-- tests/test_i18n.py
+- config/i18n/zh.json
+- config/i18n/en.json
+- config/vaspkit_options.json
+- src/vasp_mvp/vaspkit_options.py
+- src/vasp_mvp/vaspkit_runner.py
+
+Every new UI feature must include both Chinese and English translations.
+
+## Development safety
+
+Codex must not:
+
+- rewrite the whole project at once;
+- remove the existing task status and log monitoring feature;
+- start real VASP calculations without explicit user confirmation;
+- modify the VASP installation directory;
+- modify the POTCAR library;
+- use shell=True in subprocess calls;
+- commit POTCAR, WAVECAR, CHGCAR, OUTCAR, vasprun.xml, or other large VASP output files;
+- put VASPKIT option definitions directly into app.py.
+
+Preferred development order:
+
+1. Add bilingual i18n infrastructure.
+2. Convert existing UI text to t("...").
+3. Add VASPKIT option config.
+4. Add VASPKIT UI form.
+5. Add dry-run VASPKIT backend.
+6. Add real VASPKIT backend.
+7. Connect draft → preview → confirm → run workflow.
