@@ -44,7 +44,7 @@ VASPKIT_COMMON_INCAR_KEYS = ("SR", "ST", "BD", "PU", "D3", "H6")
 @st.cache_resource
 def resources():
     config = load_app_config()
-    return config, load_potcar_config(), connect(config.workspace)
+    return config, load_potcar_config()
 
 
 def current_lang() -> str:
@@ -672,7 +672,8 @@ def show_workflow_page(config, potcars, conn) -> None:
 def main() -> None:
     st.set_page_config(page_title=t("app.page_title", "zh"), layout="wide")
     language_selector()
-    config, potcars, conn = resources()
+    config, potcars = resources()
+    conn = connect(config.workspace)
 
     st.title(tr("app.title"))
     workflow_tab, vaspkit_tab = st.tabs([tr("tabs.workflow"), tr("tabs.vaspkit_generator")])
