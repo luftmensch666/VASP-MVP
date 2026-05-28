@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import time
 from datetime import datetime
@@ -24,10 +25,19 @@ from vasp_mvp.runner import run_dir, start_vasp, stop_task, tail_file, write_con
 from vasp_mvp.rules import default_kpoints
 from vasp_mvp.security import safe_task_id
 from vasp_mvp.structure_io import read_structure_upload
+from vasp_mvp.vaspkit_options import get_vaspkit_section, validate_vaspkit_values
 
 
 TASK_TYPES = ("relax", "static", "molecule", "adsorption")
 RUN_RANKS = (20, 24)
+VASPKIT_GENERATION_MODES = (
+    "cif_to_poscar",
+    "full",
+    "incar_only",
+    "kpoints_only",
+    "potcar_only",
+)
+VASPKIT_COMMON_INCAR_KEYS = ("SR", "ST", "BD", "PU", "D3", "H6")
 
 
 @st.cache_resource
@@ -65,6 +75,27 @@ def bool_label(value: bool | None) -> str:
 
 def none_text(value) -> str:
     return tr("value.none") if value is None else str(value)
+
+
+def vaspkit_option(section: str, key: str) -> dict:
+    for option in get_vaspkit_section(section)["options"]:
+        if option["key"] == key:
+            return option
+    raise KeyError(key)
+
+
+def vaspkit_choice_label(option: dict, value: str) -> str:
+    label_key = option.get("choice_label_keys", {}).get(value)
+    return tr(label_key) if label_key else value
+
+
+def save_vaspkit_request(payload: dict) -> Path:
+    # 这里只保存 UI 选项草稿，不调用 VASPKIT，也不创建 VASP 运行目录。
+    draft_dir = ROOT / "draft"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    target = draft_dir / "vaspkit_request.json"
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return target
 
 
 def parse_incar_overrides(text: str) -> dict[str, str]:
@@ -327,12 +358,159 @@ def show_adsorption_table(default_ads: float | None = None) -> None:
         st.warning(tr("warning.adsorption_missing", fields=", ".join(missing)))
 
 
-def main() -> None:
-    st.set_page_config(page_title=t("app.page_title", "zh"), layout="wide")
-    language_selector()
-    config, potcars, conn = resources()
+def show_vaspkit_input_generator() -> None:
+    st.subheader(tr("vaspkit.generator.title"))
 
-    st.title(tr("app.title"))
+    uploaded_cif_option = vaspkit_option("poscar", "uploaded_cif")
+    uploaded_cif = st.file_uploader(
+        tr(uploaded_cif_option["label_key"]),
+        type=["cif"],
+        help=tr(uploaded_cif_option["help_key"]),
+        key="vaspkit_uploaded_cif",
+    )
+    if uploaded_cif is not None:
+        st.info(tr("vaspkit.uploaded_file_summary", filename=uploaded_cif.name, size=uploaded_cif.size))
+
+    generation_mode = st.selectbox(
+        tr("vaspkit.generation_mode.label"),
+        VASPKIT_GENERATION_MODES,
+        help=tr("vaspkit.generation_mode.help"),
+        format_func=lambda value: tr(f"vaspkit.generation_mode.{value}"),
+    )
+
+    st.subheader(tr(get_vaspkit_section("poscar")["label_key"]))
+    st.caption(tr(get_vaspkit_section("poscar")["help_key"]))
+    element_order_mode_option = vaspkit_option("poscar", "element_order_mode")
+    element_order_mode = st.selectbox(
+        tr(element_order_mode_option["label_key"]),
+        element_order_mode_option["choices"],
+        index=element_order_mode_option["choices"].index(element_order_mode_option["default"]),
+        help=tr(element_order_mode_option["help_key"]),
+        format_func=lambda value: vaspkit_choice_label(element_order_mode_option, value),
+    )
+    custom_order_option = vaspkit_option("poscar", "custom_element_order")
+    custom_element_order = st.text_input(
+        tr(custom_order_option["label_key"]),
+        value=custom_order_option["default"],
+        help=tr(custom_order_option["help_key"]),
+        placeholder=tr("vaspkit.placeholder.custom_element_order"),
+        disabled=element_order_mode != "custom",
+    )
+
+    st.subheader(tr(get_vaspkit_section("incar")["label_key"]))
+    st.caption(tr(get_vaspkit_section("incar")["help_key"]))
+    incar_keys_option = vaspkit_option("incar", "incar_key_parameters")
+    common_incar_key = st.selectbox(
+        tr("vaspkit.common_incar_key.label"),
+        VASPKIT_COMMON_INCAR_KEYS,
+        help=tr("vaspkit.common_incar_key.help"),
+        format_func=lambda value: vaspkit_choice_label(incar_keys_option, value),
+    )
+    custom_incar_option = vaspkit_option("incar", "incar_custom_key_string")
+    incar_custom_key_string = st.text_input(
+        tr(custom_incar_option["label_key"]),
+        value=custom_incar_option["default"],
+        help=tr(custom_incar_option["help_key"]),
+        placeholder=tr("vaspkit.placeholder.incar_custom_key_string"),
+    )
+
+    st.subheader(tr(get_vaspkit_section("kpoints")["label_key"]))
+    st.caption(tr(get_vaspkit_section("kpoints")["help_key"]))
+    kmesh_scheme_option = vaspkit_option("kpoints", "kmesh_scheme")
+    kmesh_scheme = st.selectbox(
+        tr(kmesh_scheme_option["label_key"]),
+        kmesh_scheme_option["choices"],
+        index=kmesh_scheme_option["choices"].index(kmesh_scheme_option["default"]),
+        help=tr(kmesh_scheme_option["help_key"]),
+        format_func=lambda value: vaspkit_choice_label(kmesh_scheme_option, value),
+    )
+    accuracy_preset_option = vaspkit_option("kpoints", "accuracy_preset")
+    accuracy_preset = st.selectbox(
+        tr(accuracy_preset_option["label_key"]),
+        accuracy_preset_option["choices"],
+        index=accuracy_preset_option["choices"].index(accuracy_preset_option["default"]),
+        help=tr(accuracy_preset_option["help_key"]),
+        format_func=lambda value: vaspkit_choice_label(accuracy_preset_option, value),
+    )
+    kmesh_value_option = vaspkit_option("kpoints", "kmesh_resolved_value")
+    kmesh_resolved_value = st.number_input(
+        tr(kmesh_value_option["label_key"]),
+        min_value=0.0,
+        value=float(kmesh_value_option["default"]),
+        step=0.01,
+        format="%.3f",
+        help=tr(kmesh_value_option["help_key"]),
+    )
+
+    st.subheader(tr(get_vaspkit_section("potcar")["label_key"]))
+    st.caption(tr(get_vaspkit_section("potcar")["help_key"]))
+    potcar_mode_option = vaspkit_option("potcar", "potcar_mode")
+    potcar_mode = st.selectbox(
+        tr(potcar_mode_option["label_key"]),
+        potcar_mode_option["choices"],
+        index=potcar_mode_option["choices"].index(potcar_mode_option["default"]),
+        help=tr(potcar_mode_option["help_key"]),
+        format_func=lambda value: vaspkit_choice_label(potcar_mode_option, value),
+    )
+    potcar_policy_option = vaspkit_option("potcar", "existing_potcar_policy")
+    existing_potcar_policy = st.selectbox(
+        tr(potcar_policy_option["label_key"]),
+        potcar_policy_option["choices"],
+        index=potcar_policy_option["choices"].index(potcar_policy_option["default"]),
+        help=tr(potcar_policy_option["help_key"]),
+        format_func=lambda value: vaspkit_choice_label(potcar_policy_option, value),
+    )
+
+    request = {
+        "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "generation_mode": generation_mode,
+        "poscar": {
+            "uploaded_cif": None
+            if uploaded_cif is None
+            else {"filename": uploaded_cif.name, "size": uploaded_cif.size},
+            "element_order_mode": element_order_mode,
+            "custom_element_order": custom_element_order,
+        },
+        "incar": {
+            "incar_key_parameters": [common_incar_key],
+            "incar_custom_key_string": incar_custom_key_string,
+        },
+        "kpoints": {
+            "kmesh_scheme": kmesh_scheme,
+            "accuracy_preset": accuracy_preset,
+            "kmesh_resolved_value": kmesh_resolved_value,
+        },
+        "potcar": {
+            "potcar_mode": potcar_mode,
+            "existing_potcar_policy": existing_potcar_policy,
+        },
+    }
+
+    if st.button(tr("button.generate_vaspkit_draft"), type="primary"):
+        validation_errors = []
+        validation_errors.extend(
+            validate_vaspkit_values(
+                "poscar",
+                {
+                    "uploaded_cif": request["poscar"]["uploaded_cif"],
+                    "element_order_mode": element_order_mode,
+                    "custom_element_order": custom_element_order,
+                },
+            )
+        )
+        validation_errors.extend(validate_vaspkit_values("incar", request["incar"]))
+        validation_errors.extend(validate_vaspkit_values("kpoints", request["kpoints"]))
+        validation_errors.extend(validate_vaspkit_values("potcar", request["potcar"]))
+        if validation_errors:
+            st.error(tr("error.vaspkit_validation", errors="; ".join(validation_errors)))
+        else:
+            saved_path = save_vaspkit_request(request)
+            st.success(tr("success.vaspkit_draft_saved", path=saved_path))
+            st.subheader(tr("vaspkit.json_preview"))
+            st.json(request)
+
+
+def show_workflow_page(config, potcars, conn) -> None:
     try:
         draft, dry_run = sidebar_new_task(config, potcars)
     except Exception as exc:
@@ -356,6 +534,19 @@ def main() -> None:
             show_stop_control(conn, task)
         with right:
             show_results(task)
+
+
+def main() -> None:
+    st.set_page_config(page_title=t("app.page_title", "zh"), layout="wide")
+    language_selector()
+    config, potcars, conn = resources()
+
+    st.title(tr("app.title"))
+    workflow_tab, vaspkit_tab = st.tabs([tr("tabs.workflow"), tr("tabs.vaspkit_generator")])
+    with workflow_tab:
+        show_workflow_page(config, potcars, conn)
+    with vaspkit_tab:
+        show_vaspkit_input_generator()
 
 
 if __name__ == "__main__":
