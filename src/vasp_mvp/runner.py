@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import db
-from .models import AppConfig, PotcarConfig, TaskDraft
+from .models import AppConfig, PotcarConfig, TaskDraft, TaskRecord
 from .security import potcar_paths, task_dir, validate_mpi_ranks, validate_vasp_bin
 
 
@@ -64,8 +64,9 @@ def start_vasp(
     ranks = validate_mpi_ranks(config, request.mpi_ranks)
     task_root = task_dir(config, request.task_id)
     workdir = run_dir(task_root)
-    if not (workdir / "INCAR").exists() or not (workdir / "POTCAR").exists():
-        raise FileNotFoundError("Task directory is not confirmed yet.")
+    missing = validate_run_inputs(task_root)
+    if missing:
+        raise FileNotFoundError("Missing required run inputs: " + ", ".join(missing))
 
     out_path = workdir / "vasp.out"
     args = mpirun_args(ranks, config.vasp_bin)
@@ -99,6 +100,75 @@ def start_vasp(
             start_new_session=True,
         )
     db.update_task_status(conn, request.task_id, "running", pid=process.pid, start_time=start_time)
+    return process
+
+
+def validate_run_inputs(task_root: Path) -> list[str]:
+    """检查任务 run/ 目录中启动 VASP 所需的四个输入文件。
+
+    这里只检查存在性和非空，具体 POSCAR/POTCAR 元素顺序由 Input Set 验证流程负责。
+    """
+
+    workdir = run_dir(task_root)
+    missing: list[str] = []
+    for filename in ("INCAR", "POSCAR", "KPOINTS", "POTCAR"):
+        path = workdir / filename
+        if not path.exists() or path.stat().st_size == 0:
+            missing.append(filename)
+    return missing
+
+
+def start_task_record(
+    config: AppConfig,
+    task: TaskRecord,
+    conn: sqlite3.Connection,
+    *,
+    ranks: int | None = None,
+    dry_run: bool = False,
+) -> subprocess.Popen | None:
+    """从已提交任务的 run/ 目录启动 VASP。
+
+    该入口用于 Input Set 绑定创建的任务，不依赖 TaskDraft；仍使用参数列表和 shell=False。
+    """
+
+    selected_ranks = validate_mpi_ranks(config, ranks or config.default_mpi_ranks)
+    missing = validate_run_inputs(task.task_root)
+    if missing:
+        raise FileNotFoundError("Missing required run inputs: " + ", ".join(missing))
+
+    workdir = run_dir(task.task_root)
+    out_path = workdir / "vasp.out"
+    args = mpirun_args(selected_ranks, config.vasp_bin)
+    start_time = datetime.utcnow()
+    if dry_run:
+        db.update_task_status(conn, task.task_id, "running", start_time=start_time)
+        _write_dry_run_outputs(workdir, args)
+        db.update_task_status(
+            conn,
+            task.task_id,
+            "finished",
+            end_time=datetime.utcnow(),
+            return_code=0,
+        )
+        return None
+
+    vasp_bin = validate_vasp_bin(config)
+    env = os.environ.copy()
+    env["OMP_NUM_THREADS"] = "1"
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["OMP_STACKSIZE"] = "512m"
+    args = mpirun_args(selected_ranks, vasp_bin)
+    with out_path.open("ab") as out:
+        process = subprocess.Popen(
+            args,
+            cwd=workdir,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            env=env,
+            shell=False,
+            start_new_session=True,
+        )
+    db.update_task_status(conn, task.task_id, "running", pid=process.pid, start_time=start_time)
     return process
 
 

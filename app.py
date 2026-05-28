@@ -21,6 +21,7 @@ from vasp_mvp.db import connect, create_task, list_tasks, update_task_status
 from vasp_mvp.i18n import t
 from vasp_mvp.input_sets import (
     EDITABLE_INPUT_FILES,
+    bind_input_set_to_task,
     build_input_file_hashes,
     create_input_set,
     input_set_file_paths,
@@ -32,7 +33,7 @@ from vasp_mvp.input_sets import (
 from vasp_mvp.models import InputSet, TaskDraft, TaskRecord, TaskRequest
 from vasp_mvp.parser import parse_metrics
 from vasp_mvp.renderers import build_draft
-from vasp_mvp.runner import run_dir, start_vasp, stop_task, tail_file, write_confirmed_task
+from vasp_mvp.runner import run_dir, start_task_record, start_vasp, stop_task, tail_file, validate_run_inputs, write_confirmed_task
 from vasp_mvp.rules import default_kpoints
 from vasp_mvp.security import safe_task_id, task_dir
 from vasp_mvp.structure_io import read_structure_upload
@@ -52,6 +53,18 @@ VASPKIT_GENERATION_MODES = (
 VASPKIT_COMMON_INCAR_KEYS = ("SR", "ST", "BD", "PU", "D3", "H6")
 INPUT_SET_FILTERS = ("all", "usable", "dry_run", "invalid", "edited")
 CORE_INPUT_FILES = ("INCAR", "POSCAR", "KPOINTS", "POTCAR")
+INPUT_SET_TASK_MODULES = (
+    "single_atom_catalysis",
+    "molecule_optimization",
+    "slab_optimization",
+    "static_single_point",
+)
+INPUT_SET_TASK_TYPE_MAP = {
+    "single_atom_catalysis": "static",
+    "molecule_optimization": "molecule",
+    "slab_optimization": "relax",
+    "static_single_point": "static",
+}
 
 
 @st.cache_resource
@@ -97,6 +110,10 @@ def bool_label(value: bool | None) -> str:
 
 def input_set_filter_label(value: str) -> str:
     return tr(f"input_set.filter.{value}")
+
+
+def input_set_task_module_label(value: str) -> str:
+    return tr(f"input_set.task_module.{value}")
 
 
 def none_text(value) -> str:
@@ -326,6 +343,32 @@ def show_stop_control(conn, task: TaskRecord) -> None:
             st.error(str(exc))
         except Exception as exc:
             st.error(str(exc))
+
+
+def show_task_start_control(config, conn, task: TaskRecord) -> None:
+    if task.status != "committed":
+        return
+    st.subheader(tr("task.start_committed"))
+    missing = validate_run_inputs(task.task_root)
+    if missing:
+        st.error(tr("error.task_run_inputs_missing", files=", ".join(missing)))
+        return
+    dry_run = st.checkbox(tr("sidebar.dry_run"), value=True, key=f"start_dry_run_{task.task_id}")
+    ranks = st.selectbox(
+        tr("sidebar.mpi_ranks"),
+        config.allowed_mpi_ranks,
+        index=tuple(config.allowed_mpi_ranks).index(config.default_mpi_ranks)
+        if config.default_mpi_ranks in config.allowed_mpi_ranks
+        else 0,
+        key=f"start_ranks_{task.task_id}",
+    )
+    if st.button(tr("button.start_vasp"), key=f"start_committed_{task.task_id}"):
+        process = start_task_record(config, task, conn, ranks=int(ranks), dry_run=dry_run)
+        if process is None:
+            st.success(tr("success.dry_run_complete"))
+        else:
+            st.success(tr("success.started_vasp_pid", pid=process.pid))
+        st.rerun()
 
 
 def show_monitor(task: TaskRecord) -> None:
@@ -725,7 +768,7 @@ def show_vaspkit_input_generator(config, conn) -> None:
             st.success(tr("success.vaspkit_committed", path=run_dir(commit_task_root)))
 
 
-def show_input_sets_page(conn) -> None:
+def show_input_sets_page(config, conn) -> None:
     st.subheader(tr("input_set.title"))
     records = list_input_sets(conn)
     selected_filter = st.selectbox(
@@ -744,7 +787,7 @@ def show_input_sets_page(conn) -> None:
         filtered,
         format_func=lambda item: f"{item.input_set_id} | {item.name} | {input_set_status_label(item.status)}",
     )
-    show_input_set_detail(conn, selected)
+    show_input_set_detail(config, conn, selected)
 
 
 def input_set_matches_filter(record: InputSet, selected_filter: str) -> bool:
@@ -777,7 +820,7 @@ def show_input_set_table(records: list[InputSet]) -> None:
     )
 
 
-def show_input_set_detail(conn, input_set: InputSet) -> None:
+def show_input_set_detail(config, conn, input_set: InputSet) -> None:
     st.subheader(tr("input_set.details"))
     cols = st.columns(4)
     cols[0].metric(tr("table.input_set_id"), input_set.input_set_id)
@@ -787,6 +830,7 @@ def show_input_set_detail(conn, input_set: InputSet) -> None:
     st.caption(str(input_set.root_dir))
 
     show_input_set_actions(conn, input_set)
+    show_create_task_from_input_set(config, conn, input_set)
     st.divider()
     show_input_set_file_summary(input_set)
     show_input_file_editor(conn, input_set)
@@ -895,11 +939,75 @@ def show_input_set_actions(conn, input_set: InputSet) -> None:
         update_input_set_status(conn, input_set.input_set_id, "invalid", usable_for_vasp=False)
         st.success(tr("success.input_set_marked_not_usable"))
         st.rerun()
-    st.button(
-        tr("button.copy_to_task_run_directory"),
-        disabled=True,
-        help=tr("input_set.copy_to_task_run_directory.help"),
+def show_create_task_from_input_set(config, conn, input_set: InputSet) -> None:
+    st.subheader(tr("input_set.create_task.title"))
+    module = st.selectbox(
+        tr("input_set.create_task.module"),
+        INPUT_SET_TASK_MODULES,
+        format_func=input_set_task_module_label,
+        key=f"task_module_{input_set.input_set_id}",
     )
+    task_id = st.text_input(
+        tr("sidebar.task_id"),
+        f"{module}-{datetime.utcnow():%Y%m%d-%H%M%S}",
+        key=f"task_from_input_set_{input_set.input_set_id}",
+    )
+    if not input_set.usable_for_vasp:
+        st.error(tr("error.input_set_not_usable"))
+    missing = missing_input_set_files(input_set)
+    if missing:
+        st.error(tr("error.input_set_files_missing", files=", ".join(missing)))
+    disabled = not input_set.usable_for_vasp or bool(missing)
+    if st.button(tr("button.use_input_set_create_task"), disabled=disabled, key=f"create_task_{input_set.input_set_id}"):
+        safe_id = safe_task_id(task_id)
+        task_type = INPUT_SET_TASK_TYPE_MAP[module]
+        task_root = task_dir(config, safe_id)
+        task_run = run_dir(task_root)
+        if task_run.exists() and any((task_run / filename).exists() for filename in CORE_INPUT_FILES):
+            st.error(tr("error.task_run_already_exists", path=task_run))
+            return
+        task_run.mkdir(parents=True, exist_ok=True)
+        copy_input_set_to_run(input_set, task_run)
+        task_metadata = {
+            "task_id": safe_id,
+            "task_type": task_type,
+            "module": module,
+            "created_from": "input_set",
+            "input_set_id": input_set.input_set_id,
+            "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+        }
+        binding_metadata = {
+            "task_id": safe_id,
+            "role": "primary",
+            "input_set_id": input_set.input_set_id,
+            "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+        }
+        write_json_file(task_run / "task.json", task_metadata)
+        write_json_file(task_run / "input_set_binding.json", binding_metadata)
+        create_task(
+            conn,
+            task_id=safe_id,
+            project="default",
+            task_type=task_type,
+            task_root=task_root,
+            status="committed",
+        )
+        bind_input_set_to_task(conn, safe_id, "primary", input_set.input_set_id)
+        st.success(tr("success.task_created_from_input_set", task_id=safe_id, path=task_run))
+        st.rerun()
+
+
+def missing_input_set_files(input_set: InputSet) -> list[str]:
+    missing: list[str] = []
+    for filename, path in input_set_file_paths(input_set).items():
+        if not path.exists() or path.stat().st_size == 0:
+            missing.append(filename)
+    return missing
+
+
+def copy_input_set_to_run(input_set: InputSet, task_run: Path) -> None:
+    for filename, source in input_set_file_paths(input_set).items():
+        shutil.copy2(source, task_run / filename)
 
 
 def show_input_set_file_summary(input_set: InputSet) -> None:
@@ -1047,6 +1155,7 @@ def show_workflow_page(config, potcars, conn) -> None:
         left, right = st.columns([1, 1])
         with left:
             show_monitor(task)
+            show_task_start_control(config, conn, task)
             show_stop_control(conn, task)
         with right:
             show_results(task)
@@ -1067,7 +1176,7 @@ def main() -> None:
     with vaspkit_tab:
         show_vaspkit_input_generator(config, conn)
     with input_sets_tab:
-        show_input_sets_page(conn)
+        show_input_sets_page(config, conn)
 
 
 if __name__ == "__main__":

@@ -11,10 +11,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from vasp_mvp.db import init_db, list_tasks
+from vasp_mvp.db import create_task, init_db, list_tasks
 from vasp_mvp.models import AppConfig, PotcarConfig, StructureInfo, TaskRequest
 from vasp_mvp.renderers import build_draft
-from vasp_mvp.runner import mpirun_args, run_dir, start_vasp, write_confirmed_task
+from vasp_mvp.runner import mpirun_args, run_dir, start_task_record, start_vasp, validate_run_inputs, write_confirmed_task
 
 
 class FakeProcess:
@@ -116,6 +116,36 @@ class RunnerTest(unittest.TestCase):
             mpirun_args(20, Path("/opt/vasp/vasp_std")),
             ["mpirun", "-np", "20", "--map-by", "core", "--bind-to", "core", "/opt/vasp/vasp_std"],
         )
+
+    def test_start_task_record_checks_all_run_inputs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, _, _ = self.make_draft(root)
+            conn = init_db(config.workspace)
+            task_root = config.workspace / "task-from-input-set"
+            task_run = run_dir(task_root)
+            task_run.mkdir(parents=True)
+            for filename in ("INCAR", "POSCAR", "KPOINTS"):
+                (task_run / filename).write_text(f"{filename}\n", encoding="utf-8")
+            create_task(
+                conn,
+                task_id="task-from-input-set",
+                project="default",
+                task_type="static",
+                task_root=task_root,
+                status="committed",
+            )
+            task = list_tasks(conn)[0]
+
+            self.assertEqual(validate_run_inputs(task_root), ["POTCAR"])
+            with self.assertRaises(FileNotFoundError):
+                start_task_record(config, task, conn, dry_run=True)
+
+            (task_run / "POTCAR").write_text("TITEL = PAW_PBE Fe\n", encoding="utf-8")
+            self.assertEqual(validate_run_inputs(task_root), [])
+            result = start_task_record(config, task, conn, dry_run=True)
+            self.assertIsNone(result)
+            self.assertTrue((task_run / "vasp.out").exists())
 
 
 if __name__ == "__main__":
