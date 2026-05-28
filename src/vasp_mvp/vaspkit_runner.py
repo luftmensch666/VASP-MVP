@@ -10,6 +10,13 @@ from datetime import datetime
 from pathlib import Path
 
 
+# dry-run 只用于 UI 和流程联调，不能生成、展示或伪造真实 POTCAR。
+DRY_RUN_POTCAR_WARNING = (
+    "Dry-run mode is enabled. A real POTCAR is not generated, so this input set cannot be used for "
+    "VASP calculations. Disable dry-run and run real VASPKIT generation to create a usable input set."
+)
+
+
 @dataclass(frozen=True)
 class VaspkitRequest:
     vaspkit_bin: str
@@ -304,7 +311,7 @@ def _write_dry_run_files(request: VaspkitRequest, inputs: list[str]) -> None:
         )
     if request.generation_mode in {"full", "potcar_only"}:
         (draft_dir / "POTCAR.placeholder").write_text(
-            "POTCAR is intentionally not generated in dry-run mode.\n",
+            DRY_RUN_POTCAR_WARNING + "\n",
             encoding="utf-8",
         )
         _write_json(draft_dir / "potcar_summary.json", summarize_potcar(draft_dir / "POTCAR"))
@@ -420,7 +427,7 @@ def _validate_input_set_files(root_dir: Path, dry_run: bool) -> dict:
     warnings: list[str] = []
     errors: list[str] = []
     if dry_run:
-        warnings.append("dry_run mode did not generate a real POTCAR; this input set is not usable for real VASP.")
+        warnings.append(DRY_RUN_POTCAR_WARNING)
         return {
             "status": "dry_run",
             "usable_for_vasp": False,

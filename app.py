@@ -833,6 +833,8 @@ def show_input_set_detail(config, conn, input_set: InputSet) -> None:
     cols[2].metric(tr("table.usable_for_vasp"), bool_label(input_set.usable_for_vasp))
     cols[3].metric(tr("table.source"), input_set_source_label(input_set.source))
     st.caption(str(input_set.root_dir))
+    if input_set.status == "dry_run":
+        st.warning(tr("warning.dry_run_input_set_not_usable"))
 
     show_input_set_actions(conn, input_set)
     show_create_task_from_input_set(config, conn, input_set)
@@ -957,7 +959,9 @@ def show_create_task_from_input_set(config, conn, input_set: InputSet) -> None:
         f"{module}-{datetime.utcnow():%Y%m%d-%H%M%S}",
         key=f"task_from_input_set_{input_set.input_set_id}",
     )
-    if not input_set.usable_for_vasp:
+    if input_set.status == "dry_run":
+        st.error(tr("error.input_set_dry_run_not_usable"))
+    elif not input_set.usable_for_vasp:
         st.error(tr("error.input_set_not_usable"))
     missing = missing_input_set_files(input_set)
     if missing:
