@@ -13,11 +13,13 @@ if str(SRC) not in sys.path:
 from vasp_mvp.db import init_db
 from vasp_mvp.input_sets import (
     bind_input_set_to_task,
+    build_input_file_hashes,
     create_input_set,
     get_input_set,
     list_input_sets,
     list_task_input_sets,
     rename_input_set,
+    save_editable_input_file,
     update_input_set_status,
 )
 
@@ -73,6 +75,45 @@ class InputSetsTest(unittest.TestCase):
             renamed = get_input_set(conn, "is-1")
             self.assertIsNotNone(renamed)
             self.assertEqual(renamed.name, "CeO2 validated")
+
+    def test_save_editable_file_creates_backup_hashes_and_history(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            root_dir = workspace / "input_sets" / "is-1"
+            root_dir.mkdir(parents=True)
+            (root_dir / "INCAR").write_text("SYSTEM = old\n", encoding="utf-8")
+            (root_dir / "POSCAR").write_text("POSCAR\n", encoding="utf-8")
+            (root_dir / "KPOINTS").write_text("Gamma\n", encoding="utf-8")
+            conn = init_db(workspace)
+            input_set = create_input_set(
+                conn,
+                input_set_id="is-1",
+                name="editable",
+                source="manual",
+                status="generated",
+                usable_for_vasp=True,
+                root_dir=root_dir,
+                incar_path=root_dir / "INCAR",
+                poscar_path=root_dir / "POSCAR",
+                kpoints_path=root_dir / "KPOINTS",
+                potcar_path=root_dir / "POTCAR",
+            )
+
+            result = save_editable_input_file(input_set, "INCAR", "SYSTEM = new\n", user_action="unit_test")
+
+            self.assertEqual((root_dir / "INCAR").read_text(encoding="utf-8"), "SYSTEM = new\n")
+            self.assertIsNotNone(result["old_hash"])
+            self.assertIsNotNone(result["new_hash"])
+            self.assertNotEqual(result["old_hash"], result["new_hash"])
+            self.assertIsNotNone(result["backup_path"])
+            self.assertTrue(result["backup_path"].exists())
+            self.assertTrue((root_dir / "file_hashes.json").exists())
+            self.assertTrue((root_dir / "edit_history.jsonl").exists())
+            self.assertIn("unit_test", (root_dir / "edit_history.jsonl").read_text(encoding="utf-8"))
+            self.assertIsNotNone(build_input_file_hashes(input_set)["INCAR"]["sha256"])
+
+            with self.assertRaises(ValueError):
+                save_editable_input_file(input_set, "POTCAR", "forbidden\n")
 
     def test_bind_input_set_to_task_role(self) -> None:
         with TemporaryDirectory() as tmp:

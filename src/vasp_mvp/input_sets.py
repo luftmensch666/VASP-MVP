@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +14,8 @@ from .models import InputSet, InputSetRole, InputSetSource, InputSetStatus, Task
 INPUT_SET_SOURCES = {"vaspkit", "manual", "imported"}
 INPUT_SET_STATUSES = {"dry_run", "generated", "edited", "validated", "committed", "invalid"}
 INPUT_SET_ROLES = {"primary", "adsorbed", "clean_slab", "molecule_ref"}
+CORE_INPUT_FILES = ("INCAR", "POSCAR", "KPOINTS", "POTCAR")
+EDITABLE_INPUT_FILES = ("INCAR", "POSCAR", "KPOINTS")
 
 
 def create_input_set(
@@ -137,6 +142,98 @@ def rename_input_set(conn: sqlite3.Connection, input_set_id: str, name: str) -> 
         (name.strip(), _now(), input_set_id),
     )
     conn.commit()
+
+
+def save_editable_input_file(
+    input_set: InputSet,
+    filename: str,
+    content: str,
+    user_action: str = "manual_edit",
+) -> dict:
+    """保存可编辑输入文件，并记录备份、hash 和编辑历史。
+
+    POTCAR 不在允许列表内。这里从函数入口就拒绝 POTCAR，避免 UI 以外的调用路径绕过限制。
+    """
+
+    if filename not in EDITABLE_INPUT_FILES:
+        raise ValueError(f"File is not editable in normal UI mode: {filename}")
+    paths = input_set_file_paths(input_set)
+    target = paths[filename]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_input_file(input_set, filename)
+    old_hash = sha256_file(target) if target.exists() else None
+    target.write_text(content, encoding="utf-8")
+    new_hash = sha256_file(target)
+    file_hashes = build_input_file_hashes(input_set)
+    write_json_file(input_set.root_dir / "file_hashes.json", file_hashes)
+    history = {
+        "timestamp": _now(),
+        "filename": filename,
+        "old_hash": old_hash,
+        "new_hash": new_hash,
+        "user_action": user_action,
+    }
+    append_edit_history(input_set, history)
+    return {
+        "filename": filename,
+        "backup_path": backup_path,
+        "old_hash": old_hash,
+        "new_hash": new_hash,
+        "history_path": input_set.root_dir / "edit_history.jsonl",
+    }
+
+
+def backup_input_file(input_set: InputSet, filename: str) -> Path | None:
+    """把旧文件复制到 backups/，文件不存在时不创建空备份。"""
+
+    source = input_set_file_paths(input_set)[filename]
+    if not source.exists():
+        return None
+    backups_dir = input_set.root_dir / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    backup_path = backups_dir / f"{filename}.{timestamp}.bak"
+    shutil.copy2(source, backup_path)
+    return backup_path
+
+
+def append_edit_history(input_set: InputSet, record: dict) -> None:
+    history_path = input_set.root_dir / "edit_history.jsonl"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    with history_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def build_input_file_hashes(input_set: InputSet) -> dict:
+    hashes: dict[str, dict] = {}
+    for filename, path in input_set_file_paths(input_set).items():
+        hashes[filename] = {
+            "exists": path.exists(),
+            "size_bytes": path.stat().st_size if path.exists() else 0,
+            "sha256": sha256_file(path) if path.exists() else None,
+        }
+    return hashes
+
+
+def input_set_file_paths(input_set: InputSet) -> dict[str, Path]:
+    return {
+        "INCAR": input_set.incar_path,
+        "POSCAR": input_set.poscar_path,
+        "KPOINTS": input_set.kpoints_path,
+        "POTCAR": input_set.potcar_path,
+    }
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_json_file(path: Path, data: dict) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def bind_input_set_to_task(

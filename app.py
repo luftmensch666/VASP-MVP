@@ -19,7 +19,16 @@ from vasp_mvp.adsorption import calculate_raw_adsorption_energy
 from vasp_mvp.config import load_app_config, load_potcar_config
 from vasp_mvp.db import connect, create_task, list_tasks, update_task_status
 from vasp_mvp.i18n import t
-from vasp_mvp.input_sets import create_input_set, list_input_sets, rename_input_set, update_input_set_status
+from vasp_mvp.input_sets import (
+    EDITABLE_INPUT_FILES,
+    build_input_file_hashes,
+    create_input_set,
+    input_set_file_paths,
+    list_input_sets,
+    rename_input_set,
+    save_editable_input_file,
+    update_input_set_status,
+)
 from vasp_mvp.models import InputSet, TaskDraft, TaskRecord, TaskRequest
 from vasp_mvp.parser import parse_metrics
 from vasp_mvp.renderers import build_draft
@@ -780,6 +789,7 @@ def show_input_set_detail(conn, input_set: InputSet) -> None:
     show_input_set_actions(conn, input_set)
     st.divider()
     show_input_set_file_summary(input_set)
+    show_input_file_editor(conn, input_set)
 
     tabs = st.tabs(
         [
@@ -791,6 +801,52 @@ def show_input_set_detail(conn, input_set: InputSet) -> None:
     show_json_file(tabs[0], input_set.root_dir / "vaspkit_request.json")
     show_json_file(tabs[1], input_set.root_dir / "vaspkit_result.json")
     show_json_file(tabs[2], input_set.root_dir / "validation.json")
+
+
+def show_input_file_editor(conn, input_set: InputSet) -> None:
+    st.subheader(tr("input_set.editor.title"))
+    tabs = st.tabs([tr("tabs.incar"), tr("tabs.poscar"), tr("tabs.kpoints"), tr("tabs.potcar")])
+    paths = input_set_file_paths(input_set)
+    for tab, filename in zip(tabs[:3], EDITABLE_INPUT_FILES):
+        with tab:
+            path = paths[filename]
+            current_text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+            edited_text = st.text_area(
+                tr("input_set.editor.file_content", filename=filename),
+                value=current_text,
+                height=320,
+                key=f"editor_{input_set.input_set_id}_{filename}",
+            )
+            if st.button(tr("button.save_file"), key=f"save_{input_set.input_set_id}_{filename}"):
+                result = save_editable_input_file(
+                    input_set,
+                    filename,
+                    edited_text,
+                    user_action="ui_save",
+                )
+                update_input_set_status(conn, input_set.input_set_id, "edited", usable_for_vasp=False)
+                backup = result["backup_path"]
+                if backup is None:
+                    st.success(tr("success.input_file_saved_no_backup", filename=filename))
+                else:
+                    st.success(tr("success.input_file_saved", filename=filename, backup=backup))
+                st.rerun()
+    with tabs[3]:
+        potcar_summary = summarize_potcar(input_set.potcar_path)
+        st.write(
+            {
+                tr("table.exists"): bool_label(potcar_summary.get("exists")),
+                tr("table.size_bytes"): potcar_summary.get("size_bytes", 0),
+                tr("table.sha256"): potcar_summary.get("sha256"),
+                tr("table.titel_lines"): potcar_summary.get("titel_lines", []),
+            }
+        )
+        st.caption(tr("vaspkit.potcar_no_full_preview"))
+        st.button(
+            tr("button.regenerate_potcar"),
+            disabled=True,
+            help=tr("input_set.regenerate_potcar.help"),
+        )
 
 
 def show_input_set_actions(conn, input_set: InputSet) -> None:
@@ -888,6 +944,8 @@ def show_json_file(tab, path: Path) -> None:
 def validate_input_set_on_disk(input_set: InputSet) -> dict:
     missing: list[str] = []
     empty: list[str] = []
+    poscar_species: list[str] = []
+    potcar_species: list[str] = []
     for filename, path in input_set_file_paths(input_set).items():
         if not path.exists():
             missing.append(filename)
@@ -898,6 +956,23 @@ def validate_input_set_on_disk(input_set: InputSet) -> dict:
         errors.append(tr("input_set.validation.missing_files", files=", ".join(missing)))
     if empty:
         errors.append(tr("input_set.validation.empty_files", files=", ".join(empty)))
+    if input_set.poscar_path.exists() and input_set.poscar_path.stat().st_size > 0:
+        poscar_species = extract_poscar_species(input_set.poscar_path)
+        if not poscar_species:
+            errors.append(tr("input_set.validation.poscar_species_missing"))
+    if input_set.potcar_path.exists() and input_set.potcar_path.stat().st_size > 0:
+        potcar_summary = summarize_potcar(input_set.potcar_path)
+        potcar_species = list(potcar_summary.get("element_order", []))
+        if not potcar_species:
+            errors.append(tr("input_set.validation.potcar_titel_missing"))
+    if poscar_species and potcar_species and poscar_species != potcar_species:
+        errors.append(
+            tr(
+                "input_set.validation.species_mismatch",
+                poscar=", ".join(poscar_species),
+                potcar=", ".join(potcar_species),
+            )
+        )
     if input_set.status == "dry_run":
         return {
             "status": "dry_run",
@@ -905,6 +980,8 @@ def validate_input_set_on_disk(input_set: InputSet) -> dict:
             "required_files": list(CORE_INPUT_FILES),
             "missing_files": missing,
             "empty_files": empty,
+            "poscar_species": poscar_species,
+            "potcar_species": potcar_species,
             "warnings": [tr("warning.dry_run_input_set_not_usable")],
             "errors": errors,
             "validated_at": datetime.utcnow().isoformat(timespec="seconds"),
@@ -915,30 +992,25 @@ def validate_input_set_on_disk(input_set: InputSet) -> dict:
         "required_files": list(CORE_INPUT_FILES),
         "missing_files": missing,
         "empty_files": empty,
+        "poscar_species": poscar_species,
+        "potcar_species": potcar_species,
         "warnings": [],
         "errors": errors,
         "validated_at": datetime.utcnow().isoformat(timespec="seconds"),
     }
 
 
-def build_input_file_hashes(input_set: InputSet) -> dict:
-    hashes: dict[str, dict] = {}
-    for filename, path in input_set_file_paths(input_set).items():
-        hashes[filename] = {
-            "exists": path.exists(),
-            "size_bytes": path.stat().st_size if path.exists() else 0,
-            "sha256": sha256_file(path) if path.exists() else None,
-        }
-    return hashes
-
-
-def input_set_file_paths(input_set: InputSet) -> dict[str, Path]:
-    return {
-        "INCAR": input_set.incar_path,
-        "POSCAR": input_set.poscar_path,
-        "KPOINTS": input_set.kpoints_path,
-        "POTCAR": input_set.potcar_path,
-    }
+def extract_poscar_species(path: Path) -> list[str]:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if len(lines) < 7:
+        return []
+    species = lines[5].split()
+    if not species:
+        return []
+    # VASP5 POSCAR 的第 6 行应为元素符号；如果这里是计数行，则说明不是可安全校验的 VASP5 格式。
+    if any(not token[:1].isalpha() for token in species):
+        return []
+    return species
 
 
 def read_json_file(path: Path):
