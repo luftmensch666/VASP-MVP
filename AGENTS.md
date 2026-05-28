@@ -164,3 +164,148 @@ Preferred development order:
 5. Add dry-run VASPKIT backend.
 6. Add real VASPKIT backend.
 7. Connect draft → preview → confirm → run workflow.
+
+## Refactor and adsorption workflow requirements
+
+The system is evolving into a local VASP workflow manager.
+
+Core concepts:
+
+1. Input Set
+   A reusable group of VASP input files:
+   - INCAR
+   - POSCAR
+   - KPOINTS
+   - POTCAR
+
+2. Job
+   A single VASP execution using one Input Set.
+
+3. Workflow
+   A collection of Jobs with scientific meaning, such as adsorption energy calculation.
+
+4. Module
+   A UI module for a scientific task:
+   - adsorption energy
+   - single-atom catalysis
+   - molecule optimization
+
+## Input Set requirements
+
+Each Input Set must support:
+
+- view metadata
+- edit name and notes
+- delete with confirmation
+- edit INCAR, POSCAR, KPOINTS
+- regenerate individual file:
+  - INCAR via VASPKIT 101
+  - POSCAR via VASPKIT 105
+  - KPOINTS via VASPKIT 102
+  - POTCAR via VASPKIT 103 or 104
+- validate before use
+- maintain edit history
+- maintain file hashes
+
+POTCAR rules:
+
+- Do not show full POTCAR content in normal UI.
+- Do not edit POTCAR text directly.
+- Show only:
+  - existence
+  - size
+  - sha256
+  - TITEL lines
+  - element order
+- POTCAR can be regenerated or replaced through controlled actions.
+
+## History management
+
+The system must support:
+
+- delete one Input Set
+- delete one Job
+- delete one Workflow
+- edit name and notes
+- soft delete first, hard delete only after confirmation
+- global clear-all button with multi-step confirmation
+
+Global clear-all must never delete:
+- VASP installation
+- VASPKIT installation
+- POTCAR library
+- user home directory outside project workspace
+
+Global clear-all may delete:
+- workspace/input_sets
+- workspace/jobs
+- workspace/workflows
+- workspace/vasp_mvp.db
+only after explicit confirmation.
+
+## Adsorption workflow
+
+The first refactored scientific module must be Adsorption Energy.
+
+An adsorption workflow contains at least three Jobs:
+
+1. clean_slab
+2. molecule
+3. adsorbed_system
+
+The final equation is:
+
+E_ads = E_adsorbed_system - E_clean_slab - E_molecule
+
+The UI must show:
+- each input set
+- each job status
+- each OUTCAR final TOTEN
+- formula
+- substituted numeric equation
+- final E_ads
+- method metadata:
+  - method family: DFT
+  - functional: PBE, PBE-D3, HSE06, DFT+U, etc.
+  - VASP source of energy: OUTCAR final TOTEN
+
+Do not call this an HF formula unless the user explicitly uses a Hartree-Fock-based method. In normal VASP PBE/PBE-D3 calculations, label it as DFT adsorption energy.
+
+## UI refactor requirements
+
+Refactor UI into modules. Do not keep adding everything into app.py.
+
+Recommended structure:
+
+- src/vasp_mvp/ui/
+  - __init__.py
+  - layout.py
+  - input_sets_page.py
+  - history_page.py
+  - adsorption_page.py
+  - vaspkit_page.py
+  - workflow_page.py
+  - components.py
+
+- src/vasp_mvp/services/
+  - input_set_service.py
+  - job_service.py
+  - workflow_service.py
+  - adsorption_service.py
+  - cleanup_service.py
+  - file_edit_service.py
+  - vaspkit_service.py
+
+All user-visible text must use t("key", lang).
+Both zh.json and en.json must be updated for every new UI text.
+
+## Refactor safety
+
+Codex must not:
+- rewrite the whole project in one step
+- delete existing files without listing them first
+- break task status and log monitoring
+- start real VASP automatically
+- use shell=True
+- show full POTCAR content
+- delete workspace globally without multi-step confirmation
