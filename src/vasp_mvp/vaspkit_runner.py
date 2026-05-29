@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -16,14 +16,26 @@ DRY_RUN_POTCAR_WARNING = (
     "VASP calculations. Disable dry-run and run real VASPKIT generation to create a usable input set."
 )
 
+CORE_INPUT_FILES = ("POSCAR", "INCAR", "KPOINTS", "POTCAR")
+
+
+@dataclass(frozen=True)
+class VaspkitStep:
+    name: str
+    task_id: str
+    inputs: list[str]
+    expected_file: str
+
 
 @dataclass(frozen=True)
 class VaspkitRequest:
     vaspkit_bin: str
     draft_dir: Path
+    workspace: Path | None = None
     input_set_id: str | None = None
     input_set_name: str = ""
     uploaded_cif_path: Path | None = None
+    # 兼容旧版 vaspkit_request.json；新逻辑忽略该字段，始终完整生成四件套。
     generation_mode: str = "full"
     element_order_mode: str = "default"
     custom_element_order: str = ""
@@ -55,6 +67,7 @@ class VaspkitResult:
     input_set_path: Path | None = None
     validation_path: Path | None = None
     file_hashes_path: Path | None = None
+    generation_failure_path: Path | None = None
 
 
 def check_vaspkit_available(vaspkit_bin: str) -> bool:
@@ -65,34 +78,53 @@ def check_vaspkit_available(vaspkit_bin: str) -> bool:
 
 
 def build_vaspkit_inputs(request: VaspkitRequest) -> list[str]:
-    if request.potcar_mode == "104" and request.generation_mode in {"full", "potcar_only"}:
+    if request.potcar_mode == "104":
         raise NotImplementedError("VASPKIT POTCAR mode 104 is reserved and not implemented yet.")
 
     inputs: list[str] = []
-    if request.generation_mode in {"cif_to_poscar", "full"}:
-        if request.uploaded_cif_path is None:
-            raise ValueError("uploaded_cif_path is required for CIF to POSCAR generation.")
-        inputs.extend(
-            [
-                "1",
-                "105",
-                request.uploaded_cif_path.name,
-                request.custom_element_order if request.element_order_mode == "custom" else "",
-            ]
-        )
-
-    if request.generation_mode in {"full", "incar_only"}:
-        inputs.extend(["1", "101", _incar_key_string(request)])
-
-    if request.generation_mode in {"full", "kpoints_only"}:
-        inputs.extend(["1", "102", str(request.kmesh_scheme), str(request.kmesh_resolved_value)])
-
-    if request.generation_mode in {"full", "potcar_only"}:
-        inputs.extend(["1", request.potcar_mode])
-
-    if not inputs:
-        raise ValueError(f"Unsupported VASPKIT generation mode: {request.generation_mode}")
+    for step in build_vaspkit_steps(request):
+        inputs.extend(step.inputs)
     return inputs
+
+
+def build_vaspkit_steps(request: VaspkitRequest) -> list[VaspkitStep]:
+    """构建完整四件套的 VASPKIT 分步输入。
+
+    这里不再根据 generation_mode 分支。保留 generation_mode 只是为了兼容旧 JSON，
+    避免历史草稿反序列化时崩溃。
+    """
+
+    if request.potcar_mode == "104":
+        raise NotImplementedError("VASPKIT POTCAR mode 104 is reserved and not implemented yet.")
+    if request.uploaded_cif_path is None:
+        raise ValueError("uploaded_cif_path is required for full VASP input set generation.")
+    cif_filename = request.uploaded_cif_path.name
+    return [
+        VaspkitStep(
+            name="POSCAR generation failed at VASPKIT 105",
+            task_id="105",
+            inputs=["1", "105", cif_filename, request.custom_element_order if request.element_order_mode == "custom" else ""],
+            expected_file="POSCAR",
+        ),
+        VaspkitStep(
+            name="INCAR generation failed at VASPKIT 101",
+            task_id="101",
+            inputs=["1", "101", _incar_key_string(request)],
+            expected_file="INCAR",
+        ),
+        VaspkitStep(
+            name="KPOINTS generation failed at VASPKIT 102",
+            task_id="102",
+            inputs=["1", "102", str(request.kmesh_scheme), str(request.kmesh_resolved_value)],
+            expected_file="KPOINTS",
+        ),
+        VaspkitStep(
+            name="POTCAR generation failed at VASPKIT 103",
+            task_id="103",
+            inputs=["1", "103"],
+            expected_file="POTCAR",
+        ),
+    ]
 
 
 def run_vaspkit_interactive(
@@ -210,28 +242,94 @@ def generate_vasp_inputs_with_vaspkit(request: VaspkitRequest, dry_run: bool = T
         )
         return _finalize_input_set_artifacts(request, result)
 
-    result = run_vaspkit_interactive(request.vaspkit_bin, inputs, draft_dir)
-    generated = result.generated_files
-    missing = [name for name in _expected_outputs(request.generation_mode, request.potcar_mode) if name not in generated]
-    warnings.extend(result.warnings)
-    errors.extend(result.errors)
+    final = _generate_full_vasp_input_set(request, warnings)
+    return _finalize_input_set_artifacts(request, final)
+
+
+def _generate_full_vasp_input_set(request: VaspkitRequest, warnings: list[str]) -> VaspkitResult:
+    """真实 VASPKIT 模式：按 105/101/102/103 分步执行，并在每步后检查输出文件。
+
+    失败后只回滚当前生成目录中的四个核心输入文件，保留日志和 JSON 供排错。
+    """
+
+    draft_dir = request.draft_dir
+    stdout_path = draft_dir / "vaspkit.out"
+    stderr_path = draft_dir / "vaspkit.err"
+    request_path = draft_dir / "vaspkit_request.json"
+    result_path = draft_dir / "vaspkit_result.json"
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+
+    last_return_code: int | None = None
+    for step in build_vaspkit_steps(request):
+        if step.expected_file == "POTCAR" and (draft_dir / "POTCAR").exists():
+            warnings.append("skipped_existing_potcar")
+            continue
+        step_result = _run_vaspkit_step(request.vaspkit_bin, step, draft_dir)
+        last_return_code = step_result.returncode
+        missing = _missing_or_empty_files(draft_dir, (step.expected_file,))
+        if step_result.returncode != 0 or missing:
+            failure = _write_generation_failure(draft_dir, step, missing, stdout_path, stderr_path, step_result.returncode)
+            rollback_generated_core_files(draft_dir, _workspace_for_rollback(request))
+            error = _format_generation_failure_error(failure)
+            result = VaspkitResult(
+                ok=False,
+                dry_run=False,
+                return_code=step_result.returncode,
+                draft_dir=draft_dir,
+                generated_files=_collect_generated_files(draft_dir),
+                warnings=warnings,
+                errors=[error],
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                request_path=request_path,
+                result_path=result_path,
+                potcar_summary=summarize_potcar(draft_dir / "POTCAR"),
+                generation_failure_path=draft_dir / "generation_failure.json",
+            )
+            return result
+
+    missing = _missing_or_empty_files(draft_dir, CORE_INPUT_FILES)
     if missing:
-        warnings.append("Missing expected VASPKIT outputs: " + ", ".join(missing))
-    final = VaspkitResult(
-        ok=result.ok and not errors,
+        failure = _write_generation_failure(
+            draft_dir,
+            VaspkitStep("Final VASP input set validation failed", "final", [], "POSCAR"),
+            missing,
+            stdout_path,
+            stderr_path,
+            last_return_code,
+        )
+        rollback_generated_core_files(draft_dir, _workspace_for_rollback(request))
+        return VaspkitResult(
+            ok=False,
+            dry_run=False,
+            return_code=last_return_code,
+            draft_dir=draft_dir,
+            generated_files=_collect_generated_files(draft_dir),
+            warnings=warnings,
+            errors=[_format_generation_failure_error(failure)],
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            request_path=request_path,
+            result_path=result_path,
+            potcar_summary=summarize_potcar(draft_dir / "POTCAR"),
+            generation_failure_path=draft_dir / "generation_failure.json",
+        )
+
+    return VaspkitResult(
+        ok=True,
         dry_run=False,
-        return_code=result.return_code,
+        return_code=last_return_code if last_return_code is not None else 0,
         draft_dir=draft_dir,
-        generated_files=generated,
+        generated_files=_collect_generated_files(draft_dir),
         warnings=warnings,
-        errors=errors,
-        stdout_path=result.stdout_path,
-        stderr_path=result.stderr_path,
+        errors=[],
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
         request_path=request_path,
         result_path=result_path,
         potcar_summary=summarize_potcar(draft_dir / "POTCAR"),
     )
-    return _finalize_input_set_artifacts(request, final)
 
 
 def summarize_potcar(path: Path) -> dict:
@@ -285,37 +383,143 @@ def _incar_key_string(request: VaspkitRequest) -> str:
 
 def _write_dry_run_files(request: VaspkitRequest, inputs: list[str]) -> None:
     draft_dir = request.draft_dir
-    if request.generation_mode in {"cif_to_poscar", "full"}:
-        (draft_dir / "POSCAR").write_text(
-            "Dry-run POSCAR generated by VASPKIT wrapper\n"
-            "1.0\n"
-            "1 0 0\n"
-            "0 1 0\n"
-            "0 0 1\n"
-            "H\n"
-            "1\n"
-            "Direct\n"
-            "0 0 0\n",
-            encoding="utf-8",
-        )
-    if request.generation_mode in {"full", "incar_only"}:
-        (draft_dir / "INCAR").write_text(f"SYSTEM = dry-run\n# VASPKIT keys: {_incar_key_string(request)}\n", encoding="utf-8")
-    if request.generation_mode in {"full", "kpoints_only"}:
-        (draft_dir / "KPOINTS").write_text(
-            "Dry-run KPOINTS\n"
-            "0\n"
-            "Gamma\n"
-            "1 1 1\n"
-            "0 0 0\n",
-            encoding="utf-8",
-        )
-    if request.generation_mode in {"full", "potcar_only"}:
-        (draft_dir / "POTCAR.placeholder").write_text(
-            DRY_RUN_POTCAR_WARNING + "\n",
-            encoding="utf-8",
-        )
-        _write_json(draft_dir / "potcar_summary.json", summarize_potcar(draft_dir / "POTCAR"))
+    # dry-run 固定模拟完整输入文件组，但绝不生成真实 POTCAR。
+    (draft_dir / "POSCAR").write_text(
+        "Dry-run POSCAR generated by VASPKIT wrapper\n"
+        "1.0\n"
+        "1 0 0\n"
+        "0 1 0\n"
+        "0 0 1\n"
+        "H\n"
+        "1\n"
+        "Direct\n"
+        "0 0 0\n",
+        encoding="utf-8",
+    )
+    (draft_dir / "INCAR").write_text(f"SYSTEM = dry-run\n# VASPKIT keys: {_incar_key_string(request)}\n", encoding="utf-8")
+    (draft_dir / "KPOINTS").write_text(
+        "Dry-run KPOINTS\n"
+        "0\n"
+        "Gamma\n"
+        "1 1 1\n"
+        "0 0 0\n",
+        encoding="utf-8",
+    )
+    (draft_dir / "POTCAR.placeholder").write_text(
+        DRY_RUN_POTCAR_WARNING + "\n",
+        encoding="utf-8",
+    )
+    _write_json(draft_dir / "potcar_summary.json", summarize_potcar(draft_dir / "POTCAR"))
     (draft_dir / "vaspkit_inputs.txt").write_text("\n".join(inputs) + "\n", encoding="utf-8")
+
+
+def _run_vaspkit_step(vaspkit_bin: str, step: VaspkitStep, cwd: Path, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    """运行单个 VASPKIT 菜单步骤，并把 stdout/stderr 追加到统一日志。
+
+    使用参数列表调用并禁用 shell；每一步都有 header，便于用户排查失败发生在哪个菜单。
+    """
+
+    input_text = "\n".join(step.inputs) + "\n"
+    completed = subprocess.run(
+        [vaspkit_bin],
+        input=input_text,
+        text=True,
+        cwd=cwd,
+        capture_output=True,
+        timeout=timeout,
+        shell=False,
+    )
+    _append_step_log(cwd / "vaspkit.out", step, completed.stdout)
+    _append_step_log(cwd / "vaspkit.err", step, completed.stderr)
+    return completed
+
+
+def _append_step_log(path: Path, step: VaspkitStep, text: str) -> None:
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n===== VASPKIT {step.task_id}: {step.expected_file} =====\n")
+        fh.write(text or "")
+        if text and not text.endswith("\n"):
+            fh.write("\n")
+
+
+def _missing_or_empty_files(work_dir: Path, filenames: tuple[str, ...]) -> list[str]:
+    missing: list[str] = []
+    for filename in filenames:
+        path = work_dir / filename
+        if not path.exists() or path.stat().st_size == 0:
+            missing.append(filename)
+    return missing
+
+
+def rollback_generated_core_files(work_dir: Path, workspace: Path) -> list[str]:
+    """只回滚当前生成目录中的四个核心输入文件。
+
+    安全边界：
+    - work_dir 必须位于 workspace/input_sets 或 workspace/tasks 下；
+    - 只删除文件名严格等于 POSCAR/INCAR/KPOINTS/POTCAR 的普通文件；
+    - 不递归删除目录，也不碰日志、JSON、VASP/VASPKIT/POTCAR 库。
+    """
+
+    work_dir_resolved = work_dir.resolve()
+    workspace_resolved = workspace.resolve()
+    allowed_roots = ((workspace_resolved / "input_sets").resolve(), (workspace_resolved / "tasks").resolve())
+    if not any(work_dir_resolved == root or root in work_dir_resolved.parents for root in allowed_roots):
+        raise ValueError(f"Refusing rollback outside workspace input set or draft directories: {work_dir_resolved}")
+
+    deleted: list[str] = []
+    for filename in CORE_INPUT_FILES:
+        candidate = work_dir_resolved / filename
+        if candidate.exists() and candidate.is_file() and candidate.parent == work_dir_resolved:
+            candidate.unlink()
+            deleted.append(filename)
+    return deleted
+
+
+def _workspace_for_rollback(request: VaspkitRequest) -> Path:
+    if request.workspace is not None:
+        return request.workspace
+    resolved = request.draft_dir.resolve()
+    parts = resolved.parts
+    if "input_sets" in parts:
+        index = parts.index("input_sets")
+        if index > 0:
+            return Path(*parts[:index])
+    if "tasks" in parts:
+        index = parts.index("tasks")
+        if index > 0:
+            return Path(*parts[:index])
+    # 测试或临时目录场景：如果无法识别 workspace，就以生成目录父目录作为最小边界。
+    return resolved.parent
+
+
+def _write_generation_failure(
+    work_dir: Path,
+    step: VaspkitStep,
+    missing_files: list[str],
+    stdout_path: Path,
+    stderr_path: Path,
+    return_code: int | None,
+) -> dict:
+    failure = {
+        "failed_step": step.name,
+        "task_id": step.task_id,
+        "missing_files": missing_files,
+        "cwd": str(work_dir),
+        "vaspkit_out": str(stdout_path),
+        "vaspkit_err": str(stderr_path),
+        "return_code": return_code,
+        "existing_files": sorted(path.name for path in work_dir.iterdir()),
+    }
+    _write_json(work_dir / "generation_failure.json", failure)
+    return failure
+
+
+def _format_generation_failure_error(failure: dict) -> str:
+    return (
+        f"{failure['failed_step']}; missing files: {', '.join(failure['missing_files']) or 'none'}; "
+        f"cwd: {failure['cwd']}; vaspkit.out: {failure['vaspkit_out']}; "
+        f"vaspkit.err: {failure['vaspkit_err']}; existing files: {', '.join(failure['existing_files'])}"
+    )
 
 
 def _apply_existing_potcar_policy(draft_dir: Path, policy: str, warnings: list[str]) -> str | None:
@@ -415,6 +619,7 @@ def _finalize_input_set_artifacts(request: VaspkitRequest, result: VaspkitResult
         input_set_path=input_set_path,
         validation_path=validation_path,
         file_hashes_path=file_hashes_path,
+        generation_failure_path=result.generation_failure_path,
     )
     _write_result_json(finalized)
     return finalized
@@ -483,6 +688,7 @@ def _element_from_potential(potential: str) -> str | None:
 def _write_request_json(request: VaspkitRequest, path: Path) -> None:
     data = asdict(request)
     data["draft_dir"] = str(request.draft_dir)
+    data["workspace"] = None if request.workspace is None else str(request.workspace)
     data["uploaded_cif_path"] = None if request.uploaded_cif_path is None else str(request.uploaded_cif_path)
     _write_json(path, data)
 
@@ -498,6 +704,7 @@ def _write_result_json(result: VaspkitResult) -> None:
     data["input_set_path"] = None if result.input_set_path is None else str(result.input_set_path)
     data["validation_path"] = None if result.validation_path is None else str(result.validation_path)
     data["file_hashes_path"] = None if result.file_hashes_path is None else str(result.file_hashes_path)
+    data["generation_failure_path"] = None if result.generation_failure_path is None else str(result.generation_failure_path)
     _write_json(result.result_path, data)
 
 

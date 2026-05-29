@@ -33,7 +33,6 @@ class VaspkitRunnerTest(unittest.TestCase):
             vaspkit_bin="vaspkit",
             draft_dir=Path("/tmp/draft"),
             uploaded_cif_path=Path("/tmp/draft/CePO4.cif"),
-            generation_mode="full",
             element_order_mode="custom",
             custom_element_order="O Ce P",
             incar_key_parameters=["SR"],
@@ -51,19 +50,22 @@ class VaspkitRunnerTest(unittest.TestCase):
         request = VaspkitRequest(
             vaspkit_bin="vaspkit",
             draft_dir=Path("/tmp/draft"),
-            generation_mode="incar_only",
+            uploaded_cif_path=Path("/tmp/draft/CePO4.cif"),
             incar_key_parameters=["SR"],
             incar_custom_key_string="STH6D3",
         )
 
-        self.assertEqual(build_vaspkit_inputs(request), ["1", "101", "STH6D3"])
+        self.assertEqual(
+            build_vaspkit_inputs(request),
+            ["1", "105", "CePO4.cif", "", "1", "101", "STH6D3", "1", "102", "1", "0.04", "1", "103"],
+        )
 
     def test_potcar_mode_104_returns_not_implemented_result(self) -> None:
         with TemporaryDirectory() as tmp:
             request = VaspkitRequest(
                 vaspkit_bin="vaspkit",
                 draft_dir=Path(tmp),
-                generation_mode="potcar_only",
+                uploaded_cif_path=Path(tmp) / "CePO4.cif",
                 potcar_mode="104",
             )
             result = generate_vasp_inputs_with_vaspkit(request, dry_run=True)
@@ -80,7 +82,6 @@ class VaspkitRunnerTest(unittest.TestCase):
                 vaspkit_bin="vaspkit",
                 draft_dir=Path(tmp) / "draft",
                 uploaded_cif_path=cif,
-                generation_mode="full",
                 potcar_mode="103",
             )
 
@@ -128,9 +129,9 @@ class VaspkitRunnerTest(unittest.TestCase):
 
     def test_real_generation_marks_complete_input_set_usable(self) -> None:
         with TemporaryDirectory() as tmp:
-            draft_dir = Path(tmp) / "input-set"
+            draft_dir = Path(tmp) / "input_sets" / "input-set"
             cif = draft_dir / "CePO4.cif"
-            draft_dir.mkdir()
+            draft_dir.mkdir(parents=True)
             cif.write_text("data_test\n", encoding="utf-8")
 
             def fake_run(*args, **kwargs):
@@ -145,7 +146,7 @@ class VaspkitRunnerTest(unittest.TestCase):
                 draft_dir=draft_dir,
                 input_set_id="is-real",
                 uploaded_cif_path=cif,
-                generation_mode="full",
+                workspace=Path(tmp),
             )
             with patch("vasp_mvp.vaspkit_runner.check_vaspkit_available", return_value=True):
                 with patch("vasp_mvp.vaspkit_runner.subprocess.run", side_effect=fake_run):
@@ -162,9 +163,9 @@ class VaspkitRunnerTest(unittest.TestCase):
 
     def test_real_generation_missing_potcar_marks_input_set_invalid(self) -> None:
         with TemporaryDirectory() as tmp:
-            draft_dir = Path(tmp) / "input-set"
+            draft_dir = Path(tmp) / "input_sets" / "input-set"
             cif = draft_dir / "CePO4.cif"
-            draft_dir.mkdir()
+            draft_dir.mkdir(parents=True)
             cif.write_text("data_test\n", encoding="utf-8")
 
             def fake_run(*args, **kwargs):
@@ -178,7 +179,7 @@ class VaspkitRunnerTest(unittest.TestCase):
                 draft_dir=draft_dir,
                 input_set_id="is-invalid",
                 uploaded_cif_path=cif,
-                generation_mode="full",
+                workspace=Path(tmp),
             )
             with patch("vasp_mvp.vaspkit_runner.check_vaspkit_available", return_value=True):
                 with patch("vasp_mvp.vaspkit_runner.subprocess.run", side_effect=fake_run):

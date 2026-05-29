@@ -43,18 +43,18 @@ from vasp_mvp.security import safe_task_id, task_dir
 from vasp_mvp.structure_io import read_structure_upload
 from vasp_mvp.vaspkit_options import get_vaspkit_section, validate_vaspkit_values
 from vasp_mvp.vaspkit_runner import VaspkitRequest, VaspkitResult, generate_vasp_inputs_with_vaspkit, sha256_file, summarize_potcar
+from vasp_mvp.workflow_runner import (
+    get_workflow_job_log_paths,
+    refresh_workflow_job_status,
+    start_workflow_job,
+    stop_workflow_job,
+    tail_workflow_job_file,
+)
 from vasp_mvp.workflows import list_jobs_for_workflow, list_workflows
 
 
 TASK_TYPES = ("relax", "static", "molecule", "adsorption")
 RUN_RANKS = (20, 24)
-VASPKIT_GENERATION_MODES = (
-    "cif_to_poscar",
-    "full",
-    "incar_only",
-    "kpoints_only",
-    "potcar_only",
-)
 VASPKIT_COMMON_INCAR_KEYS = ("SR", "ST", "BD", "PU", "D3", "H6")
 INPUT_SET_FILTERS = ("all", "usable", "dry_run", "invalid", "edited")
 CORE_INPUT_FILES = ("INCAR", "POSCAR", "KPOINTS", "POTCAR")
@@ -614,13 +614,7 @@ def show_vaspkit_input_generator(config, conn) -> None:
     )
     if uploaded_cif is not None:
         st.info(tr("vaspkit.uploaded_file_summary", filename=uploaded_cif.name, size=uploaded_cif.size))
-
-    generation_mode = st.selectbox(
-        tr("vaspkit.generation_mode.label"),
-        VASPKIT_GENERATION_MODES,
-        help=tr("vaspkit.generation_mode.help"),
-        format_func=lambda value: tr(f"vaspkit.generation_mode.{value}"),
-    )
+    st.info(tr("vaspkit.full_input_set_only"))
 
     st.subheader(tr(get_vaspkit_section("poscar")["label_key"]))
     st.caption(tr(get_vaspkit_section("poscar")["help_key"]))
@@ -688,14 +682,8 @@ def show_vaspkit_input_generator(config, conn) -> None:
 
     st.subheader(tr(get_vaspkit_section("potcar")["label_key"]))
     st.caption(tr(get_vaspkit_section("potcar")["help_key"]))
-    potcar_mode_option = vaspkit_option("potcar", "potcar_mode")
-    potcar_mode = st.selectbox(
-        tr(potcar_mode_option["label_key"]),
-        potcar_mode_option["choices"],
-        index=potcar_mode_option["choices"].index(potcar_mode_option["default"]),
-        help=tr(potcar_mode_option["help_key"]),
-        format_func=lambda value: vaspkit_choice_label(potcar_mode_option, value),
-    )
+    potcar_mode = "103"
+    st.info(tr("vaspkit.potcar_default_103_only"))
     potcar_policy_option = vaspkit_option("potcar", "existing_potcar_policy")
     existing_potcar_policy = st.selectbox(
         tr(potcar_policy_option["label_key"]),
@@ -728,7 +716,7 @@ def show_vaspkit_input_generator(config, conn) -> None:
         },
     }
 
-    if st.button(tr("button.generate_vaspkit_draft"), type="primary"):
+    if st.button(tr("button.generate_vasp_input_set"), type="primary"):
         safe_id = safe_task_id(task_id)
         input_set_id = new_vaspkit_input_set_id(safe_id)
         draft_dir = vaspkit_input_set_dir(config, input_set_id)
@@ -763,7 +751,7 @@ def show_vaspkit_input_generator(config, conn) -> None:
                 input_set_id=input_set_id,
                 input_set_name=safe_id,
                 uploaded_cif_path=uploaded_cif_path,
-                generation_mode=generation_mode,
+                workspace=Path(config.workspace),
                 element_order_mode=element_order_mode,
                 custom_element_order=custom_element_order,
                 incar_key_parameters=[common_incar_key],
@@ -1306,6 +1294,64 @@ def show_adsorption_workflow_detail(db_file: Path, workflow_id: str) -> None:
                         tr("table.updated_at"): job.updated_at,
                     }
                 )
+                show_workflow_job_controls(db_file, job.job_id)
+                show_workflow_job_logs(db_file, job.job_id)
+
+
+def show_workflow_job_controls(db_file: Path, job_id: str) -> None:
+    st.caption(tr("workflow_job.monitoring"))
+    action_cols = st.columns(4)
+    if action_cols[0].button(tr("button.start_dry_run"), key=f"wf_start_dry_{job_id}"):
+        try:
+            updated = start_workflow_job(db_file, job_id=job_id, dry_run=True)
+            st.success(tr("workflow_job.dry_run_finished", job_id=updated.job_id))
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+    confirm_key = f"wf_real_confirm_{job_id}"
+    st.checkbox(tr("workflow_job.real_vasp_confirm"), key=confirm_key)
+    if action_cols[1].button(tr("button.start_real_vasp"), key=f"wf_start_real_{job_id}"):
+        if not st.session_state.get(confirm_key, False):
+            st.warning(tr("workflow_job.real_vasp_not_confirmed"))
+        else:
+            try:
+                updated = start_workflow_job(db_file, job_id=job_id, dry_run=False)
+                st.success(tr("success.workflow_job_started", job_id=updated.job_id))
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+    if action_cols[2].button(tr("button.stop_job"), key=f"wf_stop_{job_id}"):
+        try:
+            updated = stop_workflow_job(db_file, job_id=job_id)
+            st.success(tr("success.workflow_job_stopped", job_id=updated.job_id, status=status_label(updated.status)))
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+    if action_cols[3].button(tr("button.refresh_job"), key=f"wf_refresh_{job_id}"):
+        try:
+            updated = refresh_workflow_job_status(db_file, job_id)
+            st.info(tr("workflow_job.refresh", job_id=updated.job_id, status=status_label(updated.status)))
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+
+def show_workflow_job_logs(db_file: Path, job_id: str) -> None:
+    paths = get_workflow_job_log_paths(db_file, job_id)
+    st.write({tr("workflow_job.outcar_exists"): bool_label(paths["OUTCAR"]["exists"])})
+    with st.expander(tr("workflow_job.vasp_out_tail"), expanded=False):
+        try:
+            st.code(tail_workflow_job_file(db_file, job_id, "vasp.out"), language="text")
+        except Exception as exc:
+            st.error(str(exc))
+    with st.expander(tr("workflow_job.oszicar_tail"), expanded=False):
+        try:
+            st.code(tail_workflow_job_file(db_file, job_id, "OSZICAR"), language="text")
+        except Exception as exc:
+            st.error(str(exc))
 
 
 def show_adsorption_input_sets_page(config, conn) -> None:

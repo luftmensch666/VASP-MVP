@@ -29,6 +29,32 @@ def mpirun_args(ranks: int, vasp_bin: Path) -> list[str]:
     ]
 
 
+def launch_vasp_process(run_dir: Path, vasp_bin: str | Path, mpi_ranks: int) -> int:
+    """在指定 run_dir 中安全启动一次 VASP 进程并返回 pid。
+
+    该 helper 不写任何数据库表；调用方负责记录 Job/Task 状态。
+    """
+
+    workdir = Path(run_dir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["OMP_NUM_THREADS"] = "1"
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["OMP_STACKSIZE"] = "512m"
+    args = mpirun_args(int(mpi_ranks), Path(vasp_bin))
+    with (workdir / "vasp.out").open("ab") as out:
+        process = subprocess.Popen(
+            args,
+            cwd=workdir,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            env=env,
+            shell=False,
+            start_new_session=True,
+        )
+    return int(process.pid)
+
+
 def write_confirmed_task(config: AppConfig, potcars: PotcarConfig, draft: TaskDraft, conn: sqlite3.Connection) -> Path:
     request = draft.request
     validate_mpi_ranks(config, request.mpi_ranks)
