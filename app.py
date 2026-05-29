@@ -19,6 +19,15 @@ if str(SRC) not in sys.path:
 
 from vasp_mvp.adsorption import calculate_raw_adsorption_energy
 from vasp_mvp.adsorption_results import calculate_adsorption_energy, parse_adsorption_workflow_jobs
+from vasp_mvp.adsorption_visualization import (
+    MISSING_VALUE,
+    build_adsorption_summary_rows,
+    build_job_metrics_table,
+    build_loop_time_summary,
+    build_oszicar_steps_table,
+    build_total_energy_chart_data,
+    format_energy as format_visual_energy,
+)
 from vasp_mvp.adsorption_workflow import create_adsorption_workflow
 from vasp_mvp.config import load_app_config, load_potcar_config
 from vasp_mvp.db import connect, create_task, db_path as workspace_db_path, list_tasks, update_task_status
@@ -1359,7 +1368,7 @@ def show_workflow_job_metrics(db_file: Path, job_id: str) -> None:
 
 def show_adsorption_result_section(db_file: Path, workflow_id: str) -> None:
     st.divider()
-    st.subheader(tr("adsorption.result.title"))
+    st.subheader(tr("adsorption.visualization.title"))
     st.caption(tr("adsorption.result.method_explanation"))
     if st.button(tr("button.parse_adsorption_results"), key=f"parse_adsorption_results_{workflow_id}"):
         try:
@@ -1380,41 +1389,126 @@ def show_adsorption_result_section(db_file: Path, workflow_id: str) -> None:
         st.error(tr("error.adsorption_energy_failed", error=str(exc)))
         return
 
-    rows = []
-    for summary in result.role_summaries:
-        rows.append(
-            {
-                tr("table.role"): workflow_role_label(summary.role),
-                tr("table.job_id"): none_text(summary.job_id),
-                tr("adsorption.result.outcar_exists"): bool_label(summary.outcar_exists),
-                tr("adsorption.result.final_toten"): format_energy(summary.toten_ev),
-                tr("adsorption.result.loop_avg"): format_seconds(summary.loop_avg_seconds),
-                tr("adsorption.result.converged"): bool_label(summary.ionic_converged),
-                tr("table.warning"): format_adsorption_warning_codes(summary.role, summary.warning_types),
-            }
-        )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    workflow_jobs = list_jobs_for_workflow(db_file, workflow_id)
+    jobs_by_role = {binding.role: job for binding, job in workflow_jobs}
+    metrics_by_job_id = {
+        job.job_id: metrics
+        for _binding, job in workflow_jobs
+        if (metrics := get_job_metrics(db_file, job.job_id)) is not None
+    }
 
+    st.markdown(f"**{tr('adsorption.result_summary')}**")
     if result.warnings:
         st.warning("\n".join(format_adsorption_warning(warning) for warning in result.warnings))
     if not result.ready:
-        st.info(tr("adsorption.result.not_ready"))
-        return
+        st.info(tr("adsorption.not_ready"))
+    else:
+        summary_cols = st.columns(4)
+        summary_cols[0].metric(tr("adsorption.final_eads"), format_visual_energy(result.e_ads))
+        summary_cols[1].metric("E_clean_slab", format_visual_energy(result.e_clean_slab))
+        summary_cols[2].metric("E_molecule_ref", format_visual_energy(result.e_molecule_ref))
+        summary_cols[3].metric("E_adsorbed_system", format_visual_energy(result.e_adsorbed_system))
+        summary_rows = build_adsorption_summary_rows(result)
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        tr("table.term"): row["field"],
+                        tr("table.value"): row["value"],
+                    }
+                    for row in summary_rows
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    st.markdown(f"**{tr('adsorption.result.symbolic_formula')}**")
+    st.markdown(f"**{tr('adsorption.formula.symbolic')}**")
     st.code(result.formula_symbolic, language="text")
-    st.markdown(f"**{tr('adsorption.result.physical_meaning')}**")
+    st.markdown(f"**{tr('adsorption.formula.physical_meaning')}**")
     st.write(tr("adsorption.result.physical_meaning_text"))
-    st.markdown(f"**{tr('adsorption.result.numeric_substitution')}**")
-    st.code(result.formula_numeric or "", language="text")
-    st.metric(tr("adsorption.result.final_eads"), format_energy(result.e_ads))
-    st.write(
-        {
-            tr("adsorption.result.energy_source"): f"{result.energy_source} {result.energy_label}",
-            tr("table.method_family"): result.method_family,
-            tr("table.functional"): result.functional,
-            tr("table.method_notes"): result.method_notes,
-        }
+    if result.ready:
+        st.markdown(f"**{tr('adsorption.formula.numeric_substitution')}**")
+        st.code(result.formula_numeric or "", language="text")
+        st.caption(tr("adsorption.energy_interpretation"))
+
+    st.markdown(f"**{tr('adsorption.job_metrics_table')}**")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    tr("table.role"): workflow_role_label(row["role"]),
+                    tr("table.job_id"): row["job_id"],
+                    tr("table.calculation_type"): calculation_type_label(row["calculation_type"]) if row["calculation_type"] != MISSING_VALUE else row["calculation_type"],
+                    tr("table.status"): status_label(row["status"]) if row["status"] != MISSING_VALUE else row["status"],
+                    tr("adsorption.result.outcar_exists"): bool_label(row["outcar_exists"]),
+                    tr("adsorption.result.final_toten"): row["final_toten"],
+                    tr("adsorption.result.loop_avg"): row["loop_avg"],
+                    tr("adsorption.loop_count"): row["loop_count"],
+                    tr("adsorption.ionic_converged"): bool_label(row["ionic_converged"]),
+                    tr("adsorption.electronic_converged"): bool_label(row["electronic_converged"]),
+                    tr("table.warning"): format_adsorption_warning_codes(row["role"], row["warning_codes"]),
+                }
+                for row in build_job_metrics_table(result, jobs_by_role)
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    chart_rows = build_total_energy_chart_data(result)
+    if chart_rows:
+        st.markdown(f"**{tr('adsorption.energy_bar_chart')}**")
+        chart_df = pd.DataFrame(
+            [
+                {
+                    tr("table.role"): workflow_role_label(row["role"]),
+                    tr("table.energy_ev"): row["energy_ev"],
+                }
+                for row in chart_rows
+            ]
+        )
+        st.bar_chart(chart_df.set_index(tr("table.role")))
+
+    st.markdown(f"**{tr('adsorption.oszicar_steps')}**")
+    oszicar_rows = build_oszicar_steps_table(result, metrics_by_job_id)
+    if oszicar_rows:
+        oszicar_df = pd.DataFrame(
+            [
+                {
+                    tr("table.role"): workflow_role_label(row["role"]),
+                    tr("table.job_id"): row["job_id"],
+                    tr("adsorption.ionic_step"): row["ionic_step"],
+                    tr("table.energy_ev"): row["energy_ev"],
+                }
+                for row in oszicar_rows
+            ]
+        )
+        st.dataframe(oszicar_df, use_container_width=True, hide_index=True)
+        chart_data = oszicar_df.pivot(
+            index=tr("adsorption.ionic_step"),
+            columns=tr("table.role"),
+            values=tr("table.energy_ev"),
+        )
+        st.line_chart(chart_data)
+    else:
+        st.info(tr("adsorption.oszicar_steps_empty"))
+
+    st.markdown(f"**{tr('adsorption.loop_time_summary')}**")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    tr("table.role"): workflow_role_label(row["role"]),
+                    tr("table.job_id"): row["job_id"],
+                    tr("adsorption.result.loop_avg"): row["loop_avg"],
+                    tr("adsorption.loop_count"): row["loop_count"],
+                }
+                for row in build_loop_time_summary(result)
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
     )
 
 
