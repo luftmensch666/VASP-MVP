@@ -18,12 +18,25 @@ from vasp_mvp.adsorption_results import (
     parse_adsorption_workflow_jobs,
 )
 from vasp_mvp.db import db_path, init_db
+from vasp_mvp.i18n import load_translations
 from vasp_mvp.jobs import create_job, save_job_metrics
 from vasp_mvp.models import Metrics
 from vasp_mvp.workflows import bind_job_to_workflow, create_workflow
 
 
 class AdsorptionResultsTest(unittest.TestCase):
+    def test_adsorption_warning_i18n_keys_exist(self) -> None:
+        required = {
+            "adsorption.warning.missing_metrics",
+            "adsorption.warning.invalid_energy_source",
+            "adsorption.warning.missing_outcar",
+            "adsorption.warning.missing_toten",
+            "adsorption.warning.non_static_calculation",
+            "adsorption.warning.missing_required_energy",
+        }
+        self.assertFalse(required - set(load_translations("zh")))
+        self.assertFalse(required - set(load_translations("en")))
+
     def test_energy_source_and_label_normalization(self) -> None:
         self.assertEqual(normalize_energy_source(" OUTCAR "), "outcar")
         self.assertEqual(normalize_energy_label("final TOTEN"), "final_toten")
@@ -69,7 +82,8 @@ class AdsorptionResultsTest(unittest.TestCase):
 
             self.assertFalse(result.ready)
             self.assertIsNone(result.e_ads)
-            self.assertIn("molecule_ref", " ".join(result.warnings))
+            self.assertIn("molecule_ref", _warning_text(result))
+            self.assertIn("missing_required_energy", _warning_codes(result))
 
     def test_outcar_without_toten_does_not_crash_and_is_not_ready(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -86,9 +100,9 @@ class AdsorptionResultsTest(unittest.TestCase):
 
             self.assertFalse(result.ready)
             self.assertIsNone(result.e_ads)
-            self.assertIn("adsorbed_system", " ".join(result.warnings))
-            self.assertIn("final TOTEN was not parsed", " ".join(result.warnings))
-            self.assertNotIn("Energy source is not OUTCAR final TOTEN", " ".join(result.warnings))
+            self.assertIn("adsorbed_system", _warning_text(result))
+            self.assertIn("final TOTEN was not parsed", _warning_text(result))
+            self.assertNotIn("Energy source is not OUTCAR final TOTEN", _warning_text(result))
 
     def test_method_metadata_is_returned(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -122,9 +136,9 @@ class AdsorptionResultsTest(unittest.TestCase):
 
             self.assertFalse(result.ready)
             self.assertIsNone(result.e_ads)
-            self.assertIn("molecule_ref", " ".join(result.warnings))
-            self.assertIn("source='manual'", " ".join(result.warnings))
-            self.assertIn("label='manual energy'", " ".join(result.warnings))
+            self.assertIn("molecule_ref", _warning_text(result))
+            self.assertIn("source='manual'", _warning_text(result))
+            self.assertIn("label='manual energy'", _warning_text(result))
 
     def test_outcar_final_toten_with_hidden_whitespace_is_accepted(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -150,7 +164,7 @@ class AdsorptionResultsTest(unittest.TestCase):
 
             self.assertTrue(result.ready)
             self.assertAlmostEqual(result.e_ads or 0.0, 0.3)
-            self.assertNotIn("energy source is not OUTCAR final TOTEN", " ".join(result.warnings))
+            self.assertNotIn("energy source is not OUTCAR final TOTEN", _warning_text(result))
 
     def test_outcar_final_toten_source_with_none_energy_reports_missing_toten_not_invalid_source(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -173,8 +187,9 @@ class AdsorptionResultsTest(unittest.TestCase):
             self.assertFalse(result.ready)
             self.assertIsNone(result.e_ads)
             self.assertIn("missing_toten", clean_summary.warning_types)
-            self.assertIn("final TOTEN was not parsed", " ".join(result.warnings))
-            self.assertNotIn("Energy source is not OUTCAR final TOTEN", " ".join(result.warnings))
+            self.assertIn("missing_toten", _warning_codes(result))
+            self.assertIn("final TOTEN was not parsed", _warning_text(result))
+            self.assertNotIn("Energy source is not OUTCAR final TOTEN", _warning_text(result))
 
     def test_missing_outcar_is_classified_separately_from_missing_toten(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -188,8 +203,8 @@ class AdsorptionResultsTest(unittest.TestCase):
 
             self.assertFalse(result.ready)
             self.assertIn("missing_outcar", molecule_summary.warning_types)
-            self.assertIn("OUTCAR file is missing", " ".join(result.warnings))
-            self.assertNotIn("Energy source is not OUTCAR final TOTEN", " ".join(result.warnings))
+            self.assertIn("OUTCAR file is missing", _warning_text(result))
+            self.assertNotIn("Energy source is not OUTCAR final TOTEN", _warning_text(result))
 
     def test_invalid_source_is_classified_as_invalid_energy_source(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -211,7 +226,8 @@ class AdsorptionResultsTest(unittest.TestCase):
 
             self.assertFalse(result.ready)
             self.assertIn("invalid_energy_source", clean_summary.warning_types)
-            self.assertIn("Energy source is not OUTCAR final TOTEN", " ".join(result.warnings))
+            self.assertIn("invalid_energy_source", _warning_codes(result))
+            self.assertIn("Energy source is not OUTCAR final TOTEN", _warning_text(result))
 
     def test_non_static_warning_does_not_hide_missing_toten_warning(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -246,8 +262,8 @@ class AdsorptionResultsTest(unittest.TestCase):
             result = calculate_adsorption_energy(database, "ads-1")
 
             self.assertTrue(result.ready)
-            self.assertIn("clean_slab", " ".join(result.warnings))
-            self.assertIn("static single-point", " ".join(result.warnings))
+            self.assertIn("clean_slab", _warning_text(result))
+            self.assertIn("static single-point", _warning_text(result))
 
     def test_potcar_content_is_not_read_or_returned(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -323,6 +339,14 @@ def _write_outputs(workflow_root: Path, role: str, final_toten: float) -> None:
         f" 2 F= {final_toten:.8E} E0= {final_toten:.8E}\n",
         encoding="utf-8",
     )
+
+
+def _warning_text(result) -> str:
+    return " ".join(warning.message for warning in result.warnings)
+
+
+def _warning_codes(result) -> set[str]:
+    return {warning.code for warning in result.warnings}
 
 
 if __name__ == "__main__":

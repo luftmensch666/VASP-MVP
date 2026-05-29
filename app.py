@@ -171,6 +171,34 @@ def format_seconds(value) -> str:
     return tr("value.none") if value is None else f"{float(value):.3f} s"
 
 
+def format_adsorption_warning(warning) -> str:
+    key = f"adsorption.warning.{warning.code}"
+    message = tr(key)
+    if message.startswith("[[missing:"):
+        message = warning.message
+    role = workflow_role_label(warning.role) if warning.role else None
+    prefix = f"{role}: " if role else ""
+    details = warning.details or {}
+    debug_parts = []
+    if "source" in details:
+        debug_parts.append(f"source={details['source']!r}")
+    if "label" in details:
+        debug_parts.append(f"label={details['label']!r}")
+    if "calculation_type" in details:
+        debug_parts.append(f"calculation_type={details['calculation_type']!r}")
+    suffix = f" ({', '.join(debug_parts)})" if debug_parts else ""
+    return prefix + message + suffix
+
+
+def format_adsorption_warning_codes(role: str, codes: tuple[str, ...]) -> str:
+    messages = []
+    for code in codes:
+        key = f"adsorption.warning.{code}"
+        message = tr(key)
+        messages.append(message if not message.startswith("[[missing:") else code)
+    return "; ".join(messages)
+
+
 def vaspkit_option(section: str, key: str) -> dict:
     for option in get_vaspkit_section(section)["options"]:
         if option["key"] == key:
@@ -1362,13 +1390,13 @@ def show_adsorption_result_section(db_file: Path, workflow_id: str) -> None:
                 tr("adsorption.result.final_toten"): format_energy(summary.toten_ev),
                 tr("adsorption.result.loop_avg"): format_seconds(summary.loop_avg_seconds),
                 tr("adsorption.result.converged"): bool_label(summary.ionic_converged),
-                tr("table.warning"): summary.warning or "",
+                tr("table.warning"): format_adsorption_warning_codes(summary.role, summary.warning_types),
             }
         )
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     if result.warnings:
-        st.warning("; ".join(result.warnings))
+        st.warning("\n".join(format_adsorption_warning(warning) for warning in result.warnings))
     if not result.ready:
         st.info(tr("adsorption.result.not_ready"))
         return

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .jobs import get_job_metrics, parse_and_save_job_metrics
 from .models import JobMetricsRecord, JobRecord, WorkflowRecord
@@ -29,6 +30,15 @@ def normalize_energy_label(value: str | None) -> str:
 
 def is_outcar_final_toten(source: str | None, label: str | None) -> bool:
     return normalize_energy_source(source) == "outcar" and normalize_energy_label(label) == "final_toten"
+
+
+@dataclass(frozen=True)
+class AdsorptionWarning:
+    role: str | None
+    job_id: str | None
+    code: str
+    message: str
+    details: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -65,7 +75,7 @@ class AdsorptionEnergyResult:
     method_family: str | None
     functional: str | None
     method_notes: str | None
-    warnings: tuple[str, ...]
+    warnings: tuple[AdsorptionWarning, ...]
     ready: bool
     role_summaries: tuple[RoleEnergySummary, ...]
 
@@ -131,29 +141,42 @@ def calculate_adsorption_energy(
     """
 
     workflow, jobs_by_role = _require_adsorption_jobs(db_path, workflow_id)
-    warnings: list[str] = []
+    warnings: list[AdsorptionWarning] = []
     role_summaries: list[RoleEnergySummary] = []
     valid_energies: dict[str, float] = {}
 
     for role in ADSORPTION_ROLES:
         job = jobs_by_role.get(role)
         if job is None:
-            warnings.append(f"{role}: workflow job is missing")
-            role_summaries.append(_missing_role_summary(role, f"{role}: workflow job is missing"))
+            warning = AdsorptionWarning(
+                role=role,
+                job_id=None,
+                code="missing_metrics",
+                message=f"{role}: workflow job is missing",
+            )
+            warnings.append(warning)
+            role_summaries.append(_missing_role_summary(role, warning))
             continue
 
         metrics = get_job_metrics(db_path, job.job_id)
         role_warnings = _role_warnings(role, job, metrics)
-        warnings.extend(item.message for item in role_warnings)
+        warnings.extend(role_warnings)
         role_summaries.append(_role_summary(role, job, metrics, role_warnings))
         if metrics and _metric_is_final_outcar_toten(metrics):
             valid_energies[role] = float(metrics.toten_ev)
 
     method_family = workflow.method_family or "unknown"
-    if not workflow.method_family:
-        warnings.append("method_family is missing; please complete workflow method metadata")
 
     ready = all(role in valid_energies for role in ADSORPTION_ROLES)
+    if not ready:
+        warnings.append(
+            AdsorptionWarning(
+                role=None,
+                job_id=None,
+                code="missing_required_energy",
+                message="One or more OUTCAR final TOTEN values are missing, so adsorption energy cannot be calculated yet.",
+            )
+        )
     e_ads = None
     formula_numeric = None
     if ready:
@@ -219,54 +242,60 @@ def _metric_is_final_outcar_toten(metrics: JobMetricsRecord) -> bool:
     return is_outcar_final_toten(metrics.energy_source, metrics.energy_label) and metrics.toten_ev is not None
 
 
-@dataclass(frozen=True)
-class RoleWarning:
-    warning_type: str
-    message: str
-
-
-def _role_warnings(role: str, job: JobRecord, metrics: JobMetricsRecord | None) -> tuple[RoleWarning, ...]:
+def _role_warnings(role: str, job: JobRecord, metrics: JobMetricsRecord | None) -> tuple[AdsorptionWarning, ...]:
     allowed_types = STATIC_CALCULATION_TYPES.get(role, {"static"})
-    warnings: list[RoleWarning] = []
+    warnings: list[AdsorptionWarning] = []
     outcar_exists = (Path(job.run_dir) / "OUTCAR").exists()
 
     if metrics is None:
         warnings.append(
-            RoleWarning(
-                "missing_metrics",
-                f"{role}/{job.job_id}: no saved OUTCAR final TOTEN is available",
+            AdsorptionWarning(
+                role=role,
+                job_id=job.job_id,
+                code="missing_metrics",
+                message=f"{role}/{job.job_id}: no saved OUTCAR final TOTEN is available",
             )
         )
     elif not is_outcar_final_toten(metrics.energy_source, metrics.energy_label):
         warnings.append(
-            RoleWarning(
-                "invalid_energy_source",
-                f"{role}/{job.job_id}: Energy source is not OUTCAR final TOTEN; "
+            AdsorptionWarning(
+                role=role,
+                job_id=job.job_id,
+                code="invalid_energy_source",
+                message=f"{role}/{job.job_id}: Energy source is not OUTCAR final TOTEN; "
                 f"source={metrics.energy_source!r}, label={metrics.energy_label!r}.",
+                details={"source": metrics.energy_source, "label": metrics.energy_label},
             )
         )
     elif metrics.toten_ev is None:
         if outcar_exists:
             warnings.append(
-                RoleWarning(
-                    "missing_toten",
-                    f"{role}/{job.job_id}: OUTCAR exists, but final TOTEN was not parsed. "
+                AdsorptionWarning(
+                    role=role,
+                    job_id=job.job_id,
+                    code="missing_toten",
+                    message=f"{role}/{job.job_id}: OUTCAR exists, but final TOTEN was not parsed. "
                     "The calculation may be incomplete or interrupted.",
                 )
             )
         else:
             warnings.append(
-                RoleWarning(
-                    "missing_outcar",
-                    f"{role}/{job.job_id}: OUTCAR file is missing.",
+                AdsorptionWarning(
+                    role=role,
+                    job_id=job.job_id,
+                    code="missing_outcar",
+                    message=f"{role}/{job.job_id}: OUTCAR file is missing.",
                 )
             )
 
     if job.calculation_type not in allowed_types:
         warnings.append(
-            RoleWarning(
-                "non_static_calculation",
-                f"{role}/{job.job_id}: calculation_type={job.calculation_type} may not be a static single-point calculation",
+            AdsorptionWarning(
+                role=role,
+                job_id=job.job_id,
+                code="non_static_calculation",
+                message=f"{role}/{job.job_id}: calculation_type={job.calculation_type} may not be a static single-point calculation",
+                details={"calculation_type": job.calculation_type},
             )
         )
 
@@ -277,7 +306,7 @@ def _role_summary(
     role: str,
     job: JobRecord,
     metrics: JobMetricsRecord | None,
-    warnings: tuple[RoleWarning, ...],
+    warnings: tuple[AdsorptionWarning, ...],
 ) -> RoleEnergySummary:
     return RoleEnergySummary(
         role=role,
@@ -292,11 +321,11 @@ def _role_summary(
         energy_source=metrics.energy_source if metrics else None,
         energy_label=metrics.energy_label if metrics else None,
         warning="; ".join(item.message for item in warnings) or None,
-        warning_types=tuple(item.warning_type for item in warnings),
+        warning_types=tuple(item.code for item in warnings),
     )
 
 
-def _missing_role_summary(role: str, warning: str) -> RoleEnergySummary:
+def _missing_role_summary(role: str, warning: AdsorptionWarning) -> RoleEnergySummary:
     return RoleEnergySummary(
         role=role,
         job_id=None,
@@ -309,8 +338,8 @@ def _missing_role_summary(role: str, warning: str) -> RoleEnergySummary:
         electronic_converged=None,
         energy_source=None,
         energy_label=None,
-        warning=warning,
-        warning_types=("missing_metrics",),
+        warning=warning.message,
+        warning_types=(warning.code,),
     )
 
 
