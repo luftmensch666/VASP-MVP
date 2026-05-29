@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from .jobs import get_job_metrics, parse_and_save_job_metrics
+from .models import JobMetricsRecord, JobRecord, WorkflowRecord
+from .workflows import get_workflow, list_jobs_for_workflow
+
+
+ADSORPTION_ROLES = ("clean_slab", "molecule_ref", "adsorbed_system")
+STATIC_CALCULATION_TYPES = {
+    "clean_slab": {"slab_static", "static"},
+    "molecule_ref": {"molecule_static", "static"},
+    "adsorbed_system": {"adsorbed_static", "static"},
+}
+
+
+@dataclass(frozen=True)
+class RoleEnergySummary:
+    role: str
+    job_id: str | None
+    calculation_type: str | None
+    outcar_exists: bool
+    toten_ev: float | None
+    loop_avg_seconds: float | None
+    loop_count: int
+    ionic_converged: bool | None
+    electronic_converged: bool | None
+    energy_source: str | None
+    energy_label: str | None
+    warning: str | None = None
+
+
+@dataclass(frozen=True)
+class AdsorptionEnergyResult:
+    workflow_id: str
+    clean_slab_job_id: str | None
+    molecule_ref_job_id: str | None
+    adsorbed_system_job_id: str | None
+    e_clean_slab: float | None
+    e_molecule_ref: float | None
+    e_adsorbed_system: float | None
+    e_ads: float | None
+    formula_symbolic: str
+    formula_numeric: str | None
+    energy_source: str
+    energy_label: str
+    method_family: str | None
+    functional: str | None
+    method_notes: str | None
+    warnings: tuple[str, ...]
+    ready: bool
+    role_summaries: tuple[RoleEnergySummary, ...]
+
+
+def parse_adsorption_workflow_jobs(
+    db_path: Path,
+    workflow_id: str,
+) -> dict:
+    """解析吸附能 workflow 下三个 job 的 OUTCAR/OSZICAR 并保存 job_metrics。
+
+    本函数只复用 parser.parse_metrics 的现有能力，不读取 POTCAR、不启动任何计算。
+    """
+
+    workflow, jobs_by_role = _require_adsorption_jobs(db_path, workflow_id)
+    del workflow
+    results: dict[str, dict] = {}
+    for role in ADSORPTION_ROLES:
+        job = jobs_by_role.get(role)
+        if job is None:
+            results[role] = {
+                "job_id": None,
+                "parsed": False,
+                "outcar_exists": False,
+                "warning": f"{role}: workflow job is missing",
+            }
+            continue
+        outcar_exists = (job.run_dir / "OUTCAR").exists()
+        metrics = parse_and_save_job_metrics(
+            db_path,
+            job.job_id,
+            job.run_dir,
+            energy_source="OUTCAR",
+            energy_label="final TOTEN",
+        )
+        warning = None
+        if not outcar_exists or metrics.status == "OUTCAR not found":
+            warning = f"{role}: OUTCAR not found; no real OUTCAR final TOTEN is available"
+        elif metrics.toten_ev is None:
+            warning = f"{role}: final TOTEN was not found in OUTCAR"
+        results[role] = {
+            "job_id": job.job_id,
+            "parsed": True,
+            "outcar_exists": outcar_exists,
+            "toten_ev": metrics.toten_ev,
+            "loop_avg_seconds": metrics.loop_avg_seconds,
+            "loop_count": metrics.loop_count,
+            "ionic_converged": metrics.ionic_converged,
+            "electronic_converged": metrics.electronic_converged,
+            "status": metrics.status,
+            "warning": warning,
+        }
+    return results
+
+
+def calculate_adsorption_energy(
+    db_path: Path,
+    workflow_id: str,
+) -> AdsorptionEnergyResult:
+    """按固定 role 公式计算吸附能。
+
+    只接受 energy_source=OUTCAR 且 energy_label=final TOTEN 的最终总能；
+    OSZICAR/manual/unknown 等来源一律不用于最终吸附能。
+    """
+
+    workflow, jobs_by_role = _require_adsorption_jobs(db_path, workflow_id)
+    warnings: list[str] = []
+    role_summaries: list[RoleEnergySummary] = []
+    valid_energies: dict[str, float] = {}
+
+    for role in ADSORPTION_ROLES:
+        job = jobs_by_role.get(role)
+        if job is None:
+            warnings.append(f"{role}: workflow job is missing")
+            role_summaries.append(_missing_role_summary(role, f"{role}: workflow job is missing"))
+            continue
+
+        metrics = get_job_metrics(db_path, job.job_id)
+        warning = _role_warning(role, job, metrics)
+        if warning:
+            warnings.append(warning)
+        role_summaries.append(_role_summary(role, job, metrics, warning))
+        if metrics and _metric_is_final_outcar_toten(metrics):
+            valid_energies[role] = float(metrics.toten_ev)
+
+    method_family = workflow.method_family or "unknown"
+    if not workflow.method_family:
+        warnings.append("method_family is missing; please complete workflow method metadata")
+
+    ready = all(role in valid_energies for role in ADSORPTION_ROLES)
+    e_ads = None
+    formula_numeric = None
+    if ready:
+        e_ads = (
+            valid_energies["adsorbed_system"]
+            - valid_energies["clean_slab"]
+            - valid_energies["molecule_ref"]
+        )
+        formula_numeric = (
+            "E_ads = "
+            f"{valid_energies['adsorbed_system']:.6f} - "
+            f"({valid_energies['clean_slab']:.6f}) - "
+            f"({valid_energies['molecule_ref']:.6f}) = "
+            f"{e_ads:.6f} eV"
+        )
+
+    return AdsorptionEnergyResult(
+        workflow_id=workflow.workflow_id,
+        clean_slab_job_id=_job_id(jobs_by_role, "clean_slab"),
+        molecule_ref_job_id=_job_id(jobs_by_role, "molecule_ref"),
+        adsorbed_system_job_id=_job_id(jobs_by_role, "adsorbed_system"),
+        e_clean_slab=valid_energies.get("clean_slab"),
+        e_molecule_ref=valid_energies.get("molecule_ref"),
+        e_adsorbed_system=valid_energies.get("adsorbed_system"),
+        e_ads=e_ads,
+        formula_symbolic="E_ads = E_adsorbed_system - E_clean_slab - E_molecule_ref",
+        formula_numeric=formula_numeric,
+        energy_source="OUTCAR",
+        energy_label="final TOTEN",
+        method_family=method_family,
+        functional=workflow.functional,
+        method_notes=workflow.method_notes,
+        warnings=tuple(warnings),
+        ready=ready,
+        role_summaries=tuple(role_summaries),
+    )
+
+
+def get_adsorption_energy_summary(
+    db_path: Path,
+    workflow_id: str,
+) -> AdsorptionEnergyResult | None:
+    if get_workflow(db_path, workflow_id) is None:
+        return None
+    return calculate_adsorption_energy(db_path, workflow_id)
+
+
+def _require_adsorption_jobs(db_path: Path, workflow_id: str) -> tuple[WorkflowRecord, dict[str, JobRecord]]:
+    workflow = get_workflow(db_path, workflow_id)
+    if workflow is None:
+        raise ValueError(f"Workflow not found: {workflow_id}")
+    if workflow.workflow_type != "adsorption":
+        raise ValueError(f"Workflow is not an adsorption workflow: {workflow_id}")
+    jobs_by_role = {
+        binding.role: job
+        for binding, job in list_jobs_for_workflow(db_path, workflow_id)
+        if binding.role in ADSORPTION_ROLES
+    }
+    return workflow, jobs_by_role
+
+
+def _metric_is_final_outcar_toten(metrics: JobMetricsRecord) -> bool:
+    return (
+        metrics.energy_source == "OUTCAR"
+        and metrics.energy_label == "final TOTEN"
+        and metrics.toten_ev is not None
+    )
+
+
+def _role_warning(role: str, job: JobRecord, metrics: JobMetricsRecord | None) -> str | None:
+    allowed_types = STATIC_CALCULATION_TYPES.get(role, {"static"})
+    type_warning = None
+    if job.calculation_type not in allowed_types:
+        type_warning = (
+            f"{role}/{job.job_id}: calculation_type={job.calculation_type} may not be a static single-point calculation"
+        )
+
+    metric_warning = None
+    if metrics is None:
+        metric_warning = f"{role}/{job.job_id}: no saved OUTCAR final TOTEN is available"
+    elif not _metric_is_final_outcar_toten(metrics):
+        metric_warning = (
+            f"{role}/{job.job_id}: energy source is not OUTCAR final TOTEN "
+            f"({metrics.energy_source}/{metrics.energy_label})"
+        )
+
+    return "; ".join(item for item in (type_warning, metric_warning) if item) or None
+
+
+def _role_summary(
+    role: str,
+    job: JobRecord,
+    metrics: JobMetricsRecord | None,
+    warning: str | None,
+) -> RoleEnergySummary:
+    return RoleEnergySummary(
+        role=role,
+        job_id=job.job_id,
+        calculation_type=job.calculation_type,
+        outcar_exists=(job.run_dir / "OUTCAR").exists(),
+        toten_ev=metrics.toten_ev if metrics else None,
+        loop_avg_seconds=metrics.loop_avg_seconds if metrics else None,
+        loop_count=metrics.loop_count if metrics else 0,
+        ionic_converged=metrics.ionic_converged if metrics else None,
+        electronic_converged=metrics.electronic_converged if metrics else None,
+        energy_source=metrics.energy_source if metrics else None,
+        energy_label=metrics.energy_label if metrics else None,
+        warning=warning,
+    )
+
+
+def _missing_role_summary(role: str, warning: str) -> RoleEnergySummary:
+    return RoleEnergySummary(
+        role=role,
+        job_id=None,
+        calculation_type=None,
+        outcar_exists=False,
+        toten_ev=None,
+        loop_avg_seconds=None,
+        loop_count=0,
+        ionic_converged=None,
+        electronic_converged=None,
+        energy_source=None,
+        energy_label=None,
+        warning=warning,
+    )
+
+
+def _job_id(jobs_by_role: dict[str, JobRecord], role: str) -> str | None:
+    job = jobs_by_role.get(role)
+    return job.job_id if job else None

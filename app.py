@@ -18,6 +18,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from vasp_mvp.adsorption import calculate_raw_adsorption_energy
+from vasp_mvp.adsorption_results import calculate_adsorption_energy, parse_adsorption_workflow_jobs
 from vasp_mvp.adsorption_workflow import create_adsorption_workflow
 from vasp_mvp.config import load_app_config, load_potcar_config
 from vasp_mvp.db import connect, create_task, db_path as workspace_db_path, list_tasks, update_task_status
@@ -35,6 +36,7 @@ from vasp_mvp.input_sets import (
     update_input_set_status,
 )
 from vasp_mvp.models import InputSet, TaskDraft, TaskRecord, TaskRequest
+from vasp_mvp.jobs import get_job_metrics
 from vasp_mvp.parser import parse_metrics
 from vasp_mvp.renderers import build_draft
 from vasp_mvp.runner import run_dir, start_task_record, start_vasp, stop_task, tail_file, validate_run_inputs, write_confirmed_task
@@ -44,6 +46,7 @@ from vasp_mvp.structure_io import read_structure_upload
 from vasp_mvp.vaspkit_options import get_vaspkit_section, validate_vaspkit_values
 from vasp_mvp.vaspkit_runner import VaspkitRequest, VaspkitResult, generate_vasp_inputs_with_vaspkit, sha256_file, summarize_potcar
 from vasp_mvp.workflow_runner import (
+    get_workflow_job_process_state,
     get_workflow_job_log_paths,
     refresh_workflow_job_status,
     start_workflow_job,
@@ -158,6 +161,14 @@ def adsorption_choice_label(prefix: str, value: str) -> str:
 
 def none_text(value) -> str:
     return tr("value.none") if value is None else str(value)
+
+
+def format_energy(value) -> str:
+    return tr("value.none") if value is None else f"{float(value):.6f} eV"
+
+
+def format_seconds(value) -> str:
+    return tr("value.none") if value is None else f"{float(value):.3f} s"
 
 
 def vaspkit_option(section: str, key: str) -> dict:
@@ -1280,6 +1291,7 @@ def show_adsorption_workflow_detail(db_file: Path, workflow_id: str) -> None:
                 continue
             binding, job = jobs_by_role[role]
             with st.container(border=True):
+                process_state = get_workflow_job_process_state(db_file, job.job_id)
                 st.write(
                     {
                         tr("table.role"): workflow_role_label(binding.role),
@@ -1288,14 +1300,94 @@ def show_adsorption_workflow_detail(db_file: Path, workflow_id: str) -> None:
                         tr("table.job_id"): job.job_id,
                         tr("table.calculation_type"): calculation_type_label(job.calculation_type),
                         tr("table.status"): status_label(job.status),
+                        tr("workflow_job.pid"): none_text(job.pid),
+                        tr("workflow_job.process_alive"): bool_label(process_state["process_alive"]),
                         tr("table.input_set_id"): job.input_set_id,
                         tr("table.run_dir"): str(job.run_dir),
+                        tr("table.start_time"): none_text(job.start_time),
+                        tr("table.end_time"): none_text(job.end_time),
                         tr("table.created_at"): job.created_at,
                         tr("table.updated_at"): job.updated_at,
                     }
                 )
+                show_workflow_job_metrics(db_file, job.job_id)
                 show_workflow_job_controls(db_file, job.job_id)
                 show_workflow_job_logs(db_file, job.job_id)
+    show_adsorption_result_section(db_file, workflow_id)
+
+
+def show_workflow_job_metrics(db_file: Path, job_id: str) -> None:
+    metrics = get_job_metrics(db_file, job_id)
+    paths = get_workflow_job_log_paths(db_file, job_id)
+    st.write(
+        {
+            tr("adsorption.result.outcar_exists"): bool_label(paths["OUTCAR"]["exists"]),
+            tr("adsorption.result.final_toten"): format_energy(metrics.toten_ev if metrics else None),
+            tr("adsorption.result.loop_avg"): format_seconds(metrics.loop_avg_seconds if metrics else None),
+            tr("adsorption.result.converged"): bool_label(metrics.ionic_converged if metrics else None),
+        }
+    )
+
+
+def show_adsorption_result_section(db_file: Path, workflow_id: str) -> None:
+    st.divider()
+    st.subheader(tr("adsorption.result.title"))
+    st.caption(tr("adsorption.result.method_explanation"))
+    if st.button(tr("button.parse_adsorption_results"), key=f"parse_adsorption_results_{workflow_id}"):
+        try:
+            parsed = parse_adsorption_workflow_jobs(db_file, workflow_id)
+            warnings = [item.get("warning") for item in parsed.values() if item.get("warning")]
+            if warnings:
+                st.warning("; ".join(warnings))
+            else:
+                st.success(tr("success.adsorption_results_parsed"))
+            st.rerun()
+        except Exception as exc:
+            st.error(tr("error.adsorption_results_parse_failed", error=str(exc)))
+            return
+
+    try:
+        result = calculate_adsorption_energy(db_file, workflow_id)
+    except Exception as exc:
+        st.error(tr("error.adsorption_energy_failed", error=str(exc)))
+        return
+
+    rows = []
+    for summary in result.role_summaries:
+        rows.append(
+            {
+                tr("table.role"): workflow_role_label(summary.role),
+                tr("table.job_id"): none_text(summary.job_id),
+                tr("adsorption.result.outcar_exists"): bool_label(summary.outcar_exists),
+                tr("adsorption.result.final_toten"): format_energy(summary.toten_ev),
+                tr("adsorption.result.loop_avg"): format_seconds(summary.loop_avg_seconds),
+                tr("adsorption.result.converged"): bool_label(summary.ionic_converged),
+                tr("table.warning"): summary.warning or "",
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    if result.warnings:
+        st.warning("; ".join(result.warnings))
+    if not result.ready:
+        st.info(tr("adsorption.result.not_ready"))
+        return
+
+    st.markdown(f"**{tr('adsorption.result.symbolic_formula')}**")
+    st.code(result.formula_symbolic, language="text")
+    st.markdown(f"**{tr('adsorption.result.physical_meaning')}**")
+    st.write(tr("adsorption.result.physical_meaning_text"))
+    st.markdown(f"**{tr('adsorption.result.numeric_substitution')}**")
+    st.code(result.formula_numeric or "", language="text")
+    st.metric(tr("adsorption.result.final_eads"), format_energy(result.e_ads))
+    st.write(
+        {
+            tr("adsorption.result.energy_source"): f"{result.energy_source} {result.energy_label}",
+            tr("table.method_family"): result.method_family,
+            tr("table.functional"): result.functional,
+            tr("table.method_notes"): result.method_notes,
+        }
+    )
 
 
 def show_workflow_job_controls(db_file: Path, job_id: str) -> None:
@@ -1327,16 +1419,23 @@ def show_workflow_job_controls(db_file: Path, job_id: str) -> None:
 
     if action_cols[2].button(tr("workflow_job.stop_job"), key=f"wf_stop_{job_id}"):
         try:
-            updated = stop_workflow_job(db_file, job_id=job_id)
-            st.success(tr("success.workflow_job_stopped", job_id=updated.job_id, status=status_label(updated.status)))
+            result = stop_workflow_job(db_file, job_id=job_id)
+            if result.message_key == "workflow_job.stop_success":
+                st.success(tr(result.message_key))
+            else:
+                st.info(tr(result.message_key))
+            for warning in result.warnings:
+                st.warning(tr(warning))
             st.rerun()
         except Exception as exc:
-            st.error(str(exc))
+            st.error(tr("workflow_job.stop_failed", error=str(exc)))
 
     if action_cols[3].button(tr("workflow_job.refresh_button"), key=f"wf_refresh_{job_id}"):
         try:
-            updated = refresh_workflow_job_status(db_file, job_id)
-            st.info(tr("workflow_job.refresh", job_id=updated.job_id, status=status_label(updated.status)))
+            result = refresh_workflow_job_status(db_file, job_id)
+            for warning in result.warnings:
+                st.warning(tr(warning))
+            st.info(tr("workflow_job.refresh", job_id=result.job_id, status=status_label(result.status)))
             st.rerun()
         except Exception as exc:
             st.error(str(exc))

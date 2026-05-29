@@ -125,6 +125,8 @@ def update_job_status(
     start_time: datetime | None = None,
     end_time: datetime | None = None,
     return_code: int | None = None,
+    clear_pid: bool = False,
+    clear_return_code: bool = False,
 ) -> None:
     _validate_job_status(status)
     with _connect(db_path) as conn:
@@ -132,18 +134,20 @@ def update_job_status(
             """
             UPDATE jobs
             SET status = ?,
-                pid = COALESCE(?, pid),
+                pid = CASE WHEN ? THEN NULL ELSE COALESCE(?, pid) END,
                 start_time = COALESCE(?, start_time),
                 end_time = COALESCE(?, end_time),
-                return_code = COALESCE(?, return_code),
+                return_code = CASE WHEN ? THEN NULL ELSE COALESCE(?, return_code) END,
                 updated_at = ?
             WHERE job_id = ?
             """,
             (
                 status,
+                int(clear_pid),
                 pid,
                 _dt_to_text(start_time),
                 _dt_to_text(end_time),
+                int(clear_return_code),
                 return_code,
                 _now(),
                 job_id,
