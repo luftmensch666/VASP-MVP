@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 import sqlite3
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +41,8 @@ def create_input_set(
 
     _validate_source(source)
     _validate_status(status)
+    normalized_name = _normalize_required_name(name)
+    _ensure_unique_name(conn, normalized_name, exclude_input_set_id=input_set_id)
     now = _now()
     conn.execute(
         """
@@ -64,7 +67,7 @@ def create_input_set(
         """,
         (
             input_set_id,
-            name,
+            normalized_name,
             source,
             status,
             int(usable_for_vasp),
@@ -83,6 +86,44 @@ def create_input_set(
     if created is None:
         raise RuntimeError(f"Failed to create input set: {input_set_id}")
     return created
+
+
+def create_auto_input_set(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    source: InputSetSource,
+    status: InputSetStatus,
+    usable_for_vasp: bool,
+    root_dir: Path,
+    incar_path: Path,
+    poscar_path: Path,
+    kpoints_path: Path,
+    potcar_path: Path,
+    notes: str = "",
+    id_prefix: str = "is",
+) -> InputSet:
+    """创建后台自动编号的 Input Set。
+
+    UI 不再让用户编辑 input_set_id；用户只提供 name/notes。这里生成短 UUID，
+    并复用 create_input_set 的 name 必填和归一化唯一性检查。
+    """
+
+    input_set_id = f"{id_prefix}-{uuid.uuid4().hex[:12]}"
+    return create_input_set(
+        conn,
+        input_set_id=input_set_id,
+        name=name,
+        source=source,
+        status=status,
+        usable_for_vasp=usable_for_vasp,
+        root_dir=root_dir,
+        incar_path=incar_path,
+        poscar_path=poscar_path,
+        kpoints_path=kpoints_path,
+        potcar_path=potcar_path,
+        notes=notes,
+    )
 
 
 def list_input_sets(conn: sqlite3.Connection) -> list[InputSet]:
@@ -151,13 +192,15 @@ def rename_input_set(conn: sqlite3.Connection, input_set_id: str, name: str) -> 
     只更新数据库中的显示名称，不移动目录，避免影响已有文件路径和后续任务绑定。
     """
 
+    normalized_name = _normalize_required_name(name)
+    _ensure_unique_name(conn, normalized_name, exclude_input_set_id=input_set_id)
     conn.execute(
         """
         UPDATE input_sets
         SET name = ?, updated_at = ?
         WHERE input_set_id = ?
         """,
-        (name.strip(), _now(), input_set_id),
+        (normalized_name, _now(), input_set_id),
     )
     conn.commit()
 
@@ -338,6 +381,28 @@ def _validate_status(status: str) -> None:
 def _validate_role(role: str) -> None:
     if role not in INPUT_SET_ROLES:
         raise ValueError(f"Unsupported input set role: {role}")
+
+
+def _normalize_required_name(name: str) -> str:
+    normalized = (name or "").strip()
+    if not normalized:
+        raise ValueError("input_set.name_required")
+    return normalized
+
+
+def _ensure_unique_name(conn: sqlite3.Connection, name: str, *, exclude_input_set_id: str | None = None) -> None:
+    """按 name.strip().lower() 做应用层唯一性检查。
+
+    第一版不加数据库 UNIQUE index，避免历史重复数据直接迁移失败。
+    """
+
+    rows = conn.execute("SELECT input_set_id, name FROM input_sets").fetchall()
+    target = name.strip().lower()
+    for row in rows:
+        if exclude_input_set_id is not None and row["input_set_id"] == exclude_input_set_id:
+            continue
+        if (row["name"] or "").strip().lower() == target:
+            raise ValueError("input_set.name_duplicate")
 
 
 def _now() -> str:

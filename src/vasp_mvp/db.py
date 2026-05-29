@@ -21,7 +21,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at TEXT NOT NULL,
     start_time TEXT,
     end_time TEXT,
-    return_code INTEGER
+    return_code INTEGER,
+    name TEXT,
+    notes TEXT
 );
 """
 
@@ -80,7 +82,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     end_time TEXT,
     return_code INTEGER,
     mpi_ranks INTEGER,
-    vasp_bin TEXT
+    vasp_bin TEXT,
+    name TEXT,
+    notes TEXT
 );
 """
 
@@ -157,6 +161,7 @@ def init_db(workspace: Path) -> sqlite3.Connection:
     conn.execute(WORKFLOW_JOBS_SCHEMA)
     conn.execute(WORKFLOW_JOBS_UNIQUE_INDEX)
     _migrate_tasks_table(conn)
+    _migrate_jobs_table(conn)
     conn.commit()
     return conn
 
@@ -173,15 +178,18 @@ def create_task(
     start_time: datetime | None = None,
     end_time: datetime | None = None,
     return_code: int | None = None,
+    name: str | None = None,
+    notes: str | None = None,
 ) -> None:
     now = _now()
     conn.execute(
         """
         INSERT INTO tasks (
             task_id, project, task_type, status, task_root, pid,
-            created_at, updated_at, start_time, end_time, return_code
+            created_at, updated_at, start_time, end_time, return_code,
+            name, notes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(task_id) DO UPDATE SET
             project = excluded.project,
             task_type = excluded.task_type,
@@ -191,6 +199,8 @@ def create_task(
             start_time = excluded.start_time,
             end_time = excluded.end_time,
             return_code = excluded.return_code,
+            name = COALESCE(excluded.name, name),
+            notes = COALESCE(excluded.notes, notes),
             updated_at = excluded.updated_at
         """,
         (
@@ -205,6 +215,8 @@ def create_task(
             _dt_to_text(start_time),
             _dt_to_text(end_time),
             return_code,
+            name,
+            notes,
         ),
     )
     conn.commit()
@@ -332,6 +344,8 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         start_time=_text_to_dt(row["start_time"]),
         end_time=_text_to_dt(row["end_time"]),
         return_code=row["return_code"],
+        name=row["name"] if "name" in row.keys() else None,
+        notes=row["notes"] if "notes" in row.keys() else None,
     )
 
 
@@ -353,8 +367,21 @@ def _migrate_tasks_table(conn: sqlite3.Connection) -> None:
         "start_time": "ALTER TABLE tasks ADD COLUMN start_time TEXT",
         "end_time": "ALTER TABLE tasks ADD COLUMN end_time TEXT",
         "return_code": "ALTER TABLE tasks ADD COLUMN return_code INTEGER",
+        "name": "ALTER TABLE tasks ADD COLUMN name TEXT",
+        "notes": "ALTER TABLE tasks ADD COLUMN notes TEXT",
     }
     for column, statement in migrations.items():
         if column not in columns:
             conn.execute(statement)
     conn.execute("UPDATE tasks SET status = 'committed' WHERE status = 'ready'")
+
+
+def _migrate_jobs_table(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    migrations = {
+        "name": "ALTER TABLE jobs ADD COLUMN name TEXT",
+        "notes": "ALTER TABLE jobs ADD COLUMN notes TEXT",
+    }
+    for column, statement in migrations.items():
+        if column not in columns:
+            conn.execute(statement)

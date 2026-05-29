@@ -35,6 +35,8 @@ def create_job(
     input_set_id: str | None = None,
     mpi_ranks: int | None = None,
     vasp_bin: str | Path | None = None,
+    name: str | None = None,
+    notes: str | None = None,
 ) -> JobRecord:
     """创建或更新一次独立 VASP 计算记录。
 
@@ -51,9 +53,9 @@ def create_job(
             INSERT INTO jobs (
                 job_id, calculation_type, status, run_dir, input_set_id, pid,
                 created_at, updated_at, start_time, end_time, return_code,
-                mpi_ranks, vasp_bin
+                mpi_ranks, vasp_bin, name, notes
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 calculation_type = excluded.calculation_type,
                 status = excluded.status,
@@ -61,7 +63,9 @@ def create_job(
                 input_set_id = excluded.input_set_id,
                 updated_at = excluded.updated_at,
                 mpi_ranks = excluded.mpi_ranks,
-                vasp_bin = excluded.vasp_bin
+                vasp_bin = excluded.vasp_bin,
+                name = COALESCE(excluded.name, name),
+                notes = COALESCE(excluded.notes, notes)
             """,
             (
                 job_id,
@@ -77,6 +81,8 @@ def create_job(
                 None,
                 mpi_ranks,
                 None if vasp_bin is None else str(vasp_bin),
+                name,
+                notes,
             ),
         )
         row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
@@ -253,6 +259,8 @@ def _row_to_job(row: sqlite3.Row) -> JobRecord:
         return_code=row["return_code"],
         mpi_ranks=row["mpi_ranks"],
         vasp_bin=row["vasp_bin"],
+        name=row["name"] if "name" in row.keys() else None,
+        notes=row["notes"] if "notes" in row.keys() else None,
     )
 
 

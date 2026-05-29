@@ -15,6 +15,7 @@ from vasp_mvp.input_sets import (
     bind_input_set_to_task,
     build_input_file_hashes,
     create_input_set,
+    create_auto_input_set,
     get_input_set,
     list_input_sets,
     list_usable_input_sets,
@@ -76,6 +77,31 @@ class InputSetsTest(unittest.TestCase):
             renamed = get_input_set(conn, "is-1")
             self.assertIsNotNone(renamed)
             self.assertEqual(renamed.name, "CeO2 validated")
+
+    def test_create_auto_input_set_generates_id_and_stores_notes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            root_dir = workspace / "input_sets" / "auto"
+            root_dir.mkdir(parents=True)
+            conn = init_db(workspace)
+
+            created = create_auto_input_set(
+                conn,
+                name="Auto named set",
+                source="manual",
+                status="validated",
+                usable_for_vasp=True,
+                root_dir=root_dir,
+                incar_path=root_dir / "INCAR",
+                poscar_path=root_dir / "POSCAR",
+                kpoints_path=root_dir / "KPOINTS",
+                potcar_path=root_dir / "POTCAR",
+                notes="same notes field used by Data Management",
+            )
+
+            self.assertTrue(created.input_set_id.startswith("is-"))
+            self.assertEqual(created.name, "Auto named set")
+            self.assertEqual(created.notes, "same notes field used by Data Management")
 
     def test_list_usable_input_sets_uses_db_path_short_connection(self) -> None:
         with TemporaryDirectory() as tmp:

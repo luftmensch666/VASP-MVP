@@ -43,8 +43,10 @@ def create_workflow(
 
     _validate_workflow_type(workflow_type)
     _validate_workflow_status(status)
+    normalized_name = _normalize_required_name(name)
     now = _now()
     with _connect(db_path) as conn:
+        _ensure_unique_name(conn, normalized_name, exclude_workflow_id=workflow_id)
         conn.execute(
             """
             INSERT INTO workflows (
@@ -67,7 +69,7 @@ def create_workflow(
             (
                 workflow_id,
                 workflow_type,
-                name,
+                normalized_name,
                 status,
                 str(Path(root_dir)),
                 method_family,
@@ -304,6 +306,8 @@ def _row_to_joined_job(row: sqlite3.Row) -> JobRecord:
         return_code=row["return_code"],
         mpi_ranks=row["mpi_ranks"],
         vasp_bin=row["vasp_bin"],
+        name=row["name"] if "name" in row.keys() else None,
+        notes=row["notes"] if "notes" in row.keys() else None,
     )
 
 
@@ -324,6 +328,25 @@ def _validate_workflow_status(value: str) -> None:
 def _validate_workflow_role(value: str) -> None:
     if value not in WORKFLOW_ROLES:
         raise ValueError(f"Unknown workflow role: {value}")
+
+
+def _normalize_required_name(name: str) -> str:
+    normalized = (name or "").strip()
+    if not normalized:
+        raise ValueError("workflow.name_required")
+    return normalized
+
+
+def _ensure_unique_name(conn: sqlite3.Connection, name: str, *, exclude_workflow_id: str | None = None) -> None:
+    """按 workflow.name.strip().lower() 做应用层唯一性检查。"""
+
+    rows = conn.execute("SELECT workflow_id, name FROM workflows").fetchall()
+    target = name.strip().lower()
+    for row in rows:
+        if exclude_workflow_id is not None and row["workflow_id"] == exclude_workflow_id:
+            continue
+        if (row["name"] or "").strip().lower() == target:
+            raise ValueError("workflow.name_duplicate")
 
 
 def _now() -> str:

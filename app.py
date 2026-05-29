@@ -30,6 +30,20 @@ from vasp_mvp.adsorption_visualization import (
 )
 from vasp_mvp.adsorption_workflow import create_adsorption_workflow
 from vasp_mvp.config import load_app_config, load_potcar_config
+from vasp_mvp.data_management import (
+    delete_input_set,
+    delete_legacy_task,
+    delete_workflow,
+    factory_reset,
+    preview_delete_input_set,
+    preview_delete_legacy_task,
+    preview_delete_workflow,
+    preview_factory_reset,
+    update_input_set_metadata,
+    update_job_metadata,
+    update_legacy_task_metadata,
+    update_workflow_metadata,
+)
 from vasp_mvp.db import connect, create_task, db_path as workspace_db_path, list_tasks, update_task_status
 from vasp_mvp.i18n import t
 from vasp_mvp.input_sets import (
@@ -44,8 +58,10 @@ from vasp_mvp.input_sets import (
     save_editable_input_file,
     update_input_set_status,
 )
+from vasp_mvp.input_set_validation import parse_potcar_summary, validate_input_set
+from vasp_mvp.method_advisor import generate_method_description
 from vasp_mvp.models import InputSet, TaskDraft, TaskRecord, TaskRequest
-from vasp_mvp.jobs import get_job_metrics
+from vasp_mvp.jobs import get_job_metrics, list_jobs
 from vasp_mvp.parser import parse_metrics
 from vasp_mvp.renderers import build_draft
 from vasp_mvp.runner import run_dir, start_task_record, start_vasp, stop_task, tail_file, validate_run_inputs, write_confirmed_task
@@ -94,6 +110,7 @@ NAVIGATION_PAGES = (
     "single_atom",
     "molecule_optimization",
     "jobs_logs",
+    "data_management",
     "settings",
 )
 
@@ -218,6 +235,28 @@ def vaspkit_option(section: str, key: str) -> dict:
 def vaspkit_choice_label(option: dict, value: str) -> str:
     label_key = option.get("choice_label_keys", {}).get(value)
     return tr(label_key) if label_key else value
+
+
+def input_set_name_exists(conn, name: str, exclude_input_set_id: str | None = None) -> bool:
+    target = name.strip().lower()
+    rows = conn.execute("SELECT input_set_id, name FROM input_sets").fetchall()
+    return any(
+        (exclude_input_set_id is None or row["input_set_id"] != exclude_input_set_id)
+        and (row["name"] or "").strip().lower() == target
+        for row in rows
+    )
+
+
+def workflow_name_exists(db_file: Path, name: str, exclude_workflow_id: str | None = None) -> bool:
+    target = name.strip().lower()
+    with sqlite3.connect(Path(db_file)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT workflow_id, name FROM workflows").fetchall()
+    return any(
+        (exclude_workflow_id is None or row["workflow_id"] != exclude_workflow_id)
+        and (row["name"] or "").strip().lower() == target
+        for row in rows
+    )
 
 
 def vaspkit_task_root(config, task_id: str) -> Path:
@@ -619,32 +658,60 @@ def show_generated_file_preview(result: VaspkitResult) -> None:
                 st.info(tr("info.file_not_generated", filename=filename))
     with tabs[3]:
         summary = result.potcar_summary or {}
-        st.write(
-            {
-                tr("table.exists"): bool_label(summary.get("exists")),
-                tr("table.size_bytes"): summary.get("size_bytes", 0),
-                tr("table.sha256"): summary.get("sha256", ""),
-                tr("table.titel_lines"): summary.get("titel_lines", []),
-                tr("table.element_order"): summary.get("element_order", []),
-            }
-        )
+        show_potcar_summary_table(summary)
         if not summary.get("exists"):
             st.warning(tr("warning.potcar_not_generated"))
         st.caption(tr("vaspkit.potcar_no_full_preview"))
 
 
+def show_potcar_summary_table(summary: dict) -> None:
+    st.markdown(f"**{tr('input_set.potcar_summary.title')}**")
+    st.write(
+        {
+            tr("table.exists"): bool_label(summary.get("exists")),
+            tr("table.size_bytes"): summary.get("size_bytes", 0),
+            tr("table.sha256"): summary.get("sha256", ""),
+            tr("input_set.potcar_summary.number_of_potentials"): summary.get("number_of_potentials", 0),
+            tr("table.element_order"): summary.get("element_order", []),
+            tr("input_set.potcar_summary.potential"): summary.get("potential_labels", []),
+        }
+    )
+    potentials = summary.get("potentials") or []
+    if potentials:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        tr("input_set.potcar_summary.element"): item.get("element"),
+                        tr("input_set.potcar_summary.potential"): item.get("potential_label"),
+                        tr("input_set.potcar_summary.family"): item.get("paw_family"),
+                        tr("input_set.potcar_summary.vrhfin"): item.get("vrhfin"),
+                        tr("input_set.potcar_summary.titel"): item.get("titel"),
+                        tr("input_set.potcar_summary.enmax"): item.get("enmax"),
+                        tr("input_set.potcar_summary.enmin"): item.get("enmin"),
+                        tr("input_set.potcar_summary.zval"): item.get("zval"),
+                    }
+                    for item in potentials
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def show_vaspkit_input_generator(config, conn) -> None:
     st.subheader(tr("vaspkit.generator.title"))
-    task_id = st.text_input(
-        tr("sidebar.task_id"),
-        f"vaspkit-{datetime.utcnow():%Y%m%d-%H%M%S}",
-        key="vaspkit_task_id",
+    input_set_name = st.text_input(
+        tr("data_management.name"),
+        value="",
+        placeholder=tr("input_set.name_placeholder"),
+        help=tr("input_set.auto_id"),
+        key="vaspkit_input_set_name",
     )
-    task_type = st.selectbox(
-        tr("sidebar.task_type"),
-        TASK_TYPES,
-        format_func=task_type_label,
-        key="vaspkit_task_type",
+    input_set_notes = st.text_area(
+        tr("input_set.notes"),
+        value="",
+        key="vaspkit_input_set_notes",
     )
     vaspkit_bin = st.text_input(
         tr("vaspkit.bin.label"),
@@ -765,10 +832,15 @@ def show_vaspkit_input_generator(config, conn) -> None:
     }
 
     if st.button(tr("button.generate_vasp_input_set"), type="primary"):
-        safe_id = safe_task_id(task_id)
-        input_set_id = new_vaspkit_input_set_id(safe_id)
+        normalized_name = input_set_name.strip()
+        if not normalized_name:
+            st.error(tr("input_set.name_required"))
+            return
+        if input_set_name_exists(conn, normalized_name):
+            st.error(tr("input_set.name_duplicate"))
+            return
+        input_set_id = new_vaspkit_input_set_id(normalized_name)
         draft_dir = vaspkit_input_set_dir(config, input_set_id)
-        task_root = vaspkit_task_root(config, safe_id)
         draft_dir.mkdir(parents=True, exist_ok=True)
         uploaded_cif_path = None
         if uploaded_cif is not None:
@@ -797,7 +869,8 @@ def show_vaspkit_input_generator(config, conn) -> None:
                 vaspkit_bin=vaspkit_bin,
                 draft_dir=draft_dir,
                 input_set_id=input_set_id,
-                input_set_name=safe_id,
+                input_set_name=normalized_name,
+                input_set_notes=input_set_notes.strip(),
                 uploaded_cif_path=uploaded_cif_path,
                 workspace=Path(config.workspace),
                 element_order_mode=element_order_mode,
@@ -813,9 +886,6 @@ def show_vaspkit_input_generator(config, conn) -> None:
             register_vaspkit_input_set(conn, result)
             st.session_state["vaspkit_request"] = vaspkit_request
             st.session_state["vaspkit_result"] = result
-            st.session_state["vaspkit_commit_task_type"] = task_type
-            st.session_state["vaspkit_commit_task_id"] = safe_id
-            st.session_state["vaspkit_commit_task_root"] = task_root
             if result.ok:
                 st.success(tr("success.vaspkit_draft_saved", path=result.request_path))
                 if result.input_set_id:
@@ -845,22 +915,7 @@ def show_vaspkit_input_generator(config, conn) -> None:
             st.warning("; ".join(result.warnings))
         if result.errors:
             st.error("; ".join(result.errors))
-        commit_disabled = not result.ok or not result.usable_for_vasp or request_obj is None
-        if st.button(tr("button.confirm_commit_vaspkit"), disabled=commit_disabled):
-            commit_task_root = st.session_state.get(
-                "vaspkit_commit_task_root",
-                vaspkit_task_root(config, request_obj.input_set_id or "vaspkit-task"),
-            )
-            warnings = commit_vaspkit_draft(
-                conn,
-                request_obj,
-                st.session_state.get("vaspkit_commit_task_type", "static"),
-                st.session_state.get("vaspkit_commit_task_id", request_obj.input_set_id or "vaspkit-task"),
-                commit_task_root,
-            )
-            if warnings:
-                st.warning("; ".join(warnings))
-            st.success(tr("success.vaspkit_committed", path=run_dir(commit_task_root)))
+        st.info(tr("vaspkit.input_set_saved_no_legacy_task"))
 
 
 def show_input_sets_page(config, conn) -> None:
@@ -927,7 +982,6 @@ def show_input_set_detail(config, conn, input_set: InputSet) -> None:
         st.warning(tr("warning.dry_run_input_set_not_usable"))
 
     show_input_set_actions(conn, input_set)
-    show_create_task_from_input_set(config, conn, input_set)
     st.divider()
     show_input_set_file_summary(input_set)
     show_input_file_editor(conn, input_set)
@@ -973,15 +1027,7 @@ def show_input_file_editor(conn, input_set: InputSet) -> None:
                     st.success(tr("success.input_file_saved", filename=filename, backup=backup))
                 st.rerun()
     with tabs[3]:
-        potcar_summary = summarize_potcar(input_set.potcar_path)
-        st.write(
-            {
-                tr("table.exists"): bool_label(potcar_summary.get("exists")),
-                tr("table.size_bytes"): potcar_summary.get("size_bytes", 0),
-                tr("table.sha256"): potcar_summary.get("sha256"),
-                tr("table.titel_lines"): potcar_summary.get("titel_lines", []),
-            }
-        )
+        show_potcar_summary_table(parse_potcar_summary(input_set.potcar_path).to_dict())
         st.caption(tr("vaspkit.potcar_no_full_preview"))
         st.button(
             tr("button.regenerate_potcar"),
@@ -992,7 +1038,7 @@ def show_input_file_editor(conn, input_set: InputSet) -> None:
 
 def show_input_set_actions(conn, input_set: InputSet) -> None:
     st.subheader(tr("input_set.actions"))
-    current_validation = validate_input_set_on_disk(input_set)
+    current_validation = validate_input_set(input_set)
     rename_key = f"rename_{input_set.input_set_id}"
     new_name = st.text_input(
         tr("input_set.rename.label"),
@@ -1001,29 +1047,33 @@ def show_input_set_actions(conn, input_set: InputSet) -> None:
     )
     action_cols = st.columns(4)
     if action_cols[0].button(tr("button.rename_input_set"), key=f"rename_btn_{input_set.input_set_id}"):
-        rename_input_set(conn, input_set.input_set_id, new_name)
-        st.success(tr("success.input_set_renamed"))
-        st.rerun()
+        try:
+            rename_input_set(conn, input_set.input_set_id, new_name)
+            st.success(tr("success.input_set_renamed"))
+            st.rerun()
+        except ValueError as exc:
+            st.error(tr(str(exc)) if not str(exc).startswith("[[") else str(exc))
     if action_cols[1].button(tr("button.validate_input_set"), key=f"validate_btn_{input_set.input_set_id}"):
-        validation = validate_input_set_on_disk(input_set)
-        next_status = "dry_run" if input_set.status == "dry_run" else ("validated" if validation["usable_for_vasp"] else "invalid")
-        next_usable = False if input_set.status == "dry_run" else bool(validation["usable_for_vasp"])
+        validation = validate_input_set(input_set)
+        next_status = "dry_run" if input_set.status == "dry_run" else ("validated" if validation.usable_for_vasp else "invalid")
+        next_usable = False if input_set.status == "dry_run" else bool(validation.usable_for_vasp)
         update_input_set_status(
             conn,
             input_set.input_set_id,
             next_status,
             usable_for_vasp=next_usable,
         )
-        write_json_file(input_set.root_dir / "validation.json", validation)
+        write_json_file(input_set.root_dir / "validation.json", validation.to_dict())
         write_json_file(input_set.root_dir / "file_hashes.json", build_input_file_hashes(input_set))
-        if validation["usable_for_vasp"]:
+        show_validation_result(validation)
+        if validation.usable_for_vasp:
             st.success(tr("success.input_set_validated"))
-        elif input_set.status == "dry_run" and not validation["errors"]:
+        elif input_set.status == "dry_run" and not validation.errors:
             st.warning(tr("warning.dry_run_input_set_not_usable"))
         else:
-            st.warning(tr("warning.input_set_validation_failed", errors="; ".join(validation["errors"])))
+            st.warning(tr("warning.input_set_validation_failed", errors="; ".join(validation_issue_text(item) for item in validation.errors)))
         st.rerun()
-    can_mark_usable = current_validation["usable_for_vasp"] and input_set.status != "dry_run"
+    can_mark_usable = current_validation.usable_for_vasp and input_set.status != "dry_run"
     if action_cols[2].button(
         tr("button.mark_usable"),
         key=f"usable_btn_{input_set.input_set_id}",
@@ -1036,6 +1086,23 @@ def show_input_set_actions(conn, input_set: InputSet) -> None:
         update_input_set_status(conn, input_set.input_set_id, "invalid", usable_for_vasp=False)
         st.success(tr("success.input_set_marked_not_usable"))
         st.rerun()
+
+    show_validation_result(current_validation)
+
+
+def show_validation_result(validation) -> None:
+    st.markdown(f"**{tr('input_set.validation.title')}**")
+    if validation.errors:
+        st.error("\n".join(validation_issue_text(item) for item in validation.errors))
+    if validation.warnings:
+        st.warning("\n".join(validation_issue_text(item) for item in validation.warnings))
+    if validation.infos:
+        st.info("\n".join(validation_issue_text(item) for item in validation.infos))
+
+
+def validation_issue_text(issue) -> str:
+    message = tr(issue.message_key, **issue.details)
+    return message if not message.startswith("[[missing:") else issue.code
 def show_create_task_from_input_set(config, conn, input_set: InputSet) -> None:
     st.subheader(tr("input_set.create_task.title"))
     module = st.selectbox(
@@ -1176,6 +1243,298 @@ def connect_to_legacy_tasks(db_file: Path):
     return conn
 
 
+def show_data_management_page(config, db_file: Path) -> None:
+    st.subheader(tr("data_management.title"))
+    st.warning(tr("data_management.safety_notice"))
+    sections = st.tabs(
+        [
+            tr("data_management.workflows"),
+            tr("data_management.input_sets"),
+            tr("data_management.legacy_tasks"),
+            tr("data_management.factory_reset"),
+        ]
+    )
+    with sections[0]:
+        show_workflow_data_management(config, db_file)
+    with sections[1]:
+        show_input_set_data_management(config, db_file)
+    with sections[2]:
+        show_legacy_task_data_management(config, db_file)
+    with sections[3]:
+        show_factory_reset_section(config, db_file)
+
+
+def show_workflow_data_management(config, db_file: Path) -> None:
+    workflows = list_workflows(db_file)
+    st.markdown(f"**{tr('data_management.workflows')}**")
+    if workflows:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        tr("table.workflow_id"): workflow.workflow_id,
+                        tr("table.name"): workflow.name,
+                        tr("table.status"): workflow_status_label(workflow.status),
+                        tr("table.method_family"): workflow.method_family,
+                        tr("table.functional"): workflow.functional,
+                        tr("table.created_at"): workflow.created_at,
+                        tr("table.updated_at"): workflow.updated_at,
+                        tr("table.root_dir"): str(workflow.root_dir),
+                    }
+                    for workflow in workflows
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(tr("data_management.no_records"))
+
+    selected = st.selectbox(
+        tr("data_management.select_workflow"),
+        workflows,
+        format_func=lambda workflow: f"{workflow.name} | {workflow.workflow_id}",
+        disabled=not workflows,
+        key="dm_select_workflow",
+    )
+    if selected:
+        show_metadata_editor(
+            "workflow",
+            selected.workflow_id,
+            selected.name,
+            selected.notes,
+            lambda name, notes: update_workflow_metadata(db_file, selected.workflow_id, name=name, notes=notes),
+        )
+        show_delete_preview_and_action(
+            entity_type="workflow",
+            entity_id=selected.workflow_id,
+            preview_fn=lambda: preview_delete_workflow(db_file, selected.workflow_id, workspace=config.workspace),
+            delete_fn=lambda: delete_workflow(db_file, selected.workflow_id, workspace=config.workspace),
+        )
+
+    st.markdown(f"**{tr('data_management.jobs')}**")
+    jobs = list_jobs(db_file)
+    if jobs:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        tr("table.job_id"): job.job_id,
+                        tr("table.name"): job.name,
+                        tr("table.calculation_type"): calculation_type_label(job.calculation_type),
+                        tr("table.status"): status_label(job.status),
+                        tr("table.input_set_id"): job.input_set_id,
+                        tr("table.run_dir"): str(job.run_dir),
+                        tr("table.updated_at"): job.updated_at,
+                    }
+                    for job in jobs
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        selected_job = st.selectbox(
+            tr("data_management.select_job"),
+            jobs,
+            format_func=lambda job: f"{job.name or job.job_id} | {job.job_id}",
+            key="dm_select_job",
+        )
+        show_metadata_editor(
+            "job",
+            selected_job.job_id,
+            selected_job.name or "",
+            selected_job.notes or "",
+            lambda name, notes: update_job_metadata(db_file, selected_job.job_id, name=name, notes=notes),
+        )
+    else:
+        st.info(tr("data_management.no_jobs"))
+
+
+def show_input_set_data_management(config, db_file: Path) -> None:
+    conn = connect_to_legacy_tasks(db_file)
+    try:
+        input_sets = list_input_sets(conn)
+    finally:
+        conn.close()
+    if input_sets:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        tr("table.input_set_id"): item.input_set_id,
+                        tr("table.name"): item.name,
+                        tr("table.status"): input_set_status_label(item.status),
+                        tr("table.usable_for_vasp"): bool_label(item.usable_for_vasp),
+                        tr("table.created_at"): item.created_at,
+                        tr("table.updated_at"): item.updated_at,
+                        tr("table.root_dir"): str(item.root_dir),
+                    }
+                    for item in input_sets
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(tr("data_management.no_records"))
+    selected = st.selectbox(
+        tr("data_management.select_input_set"),
+        input_sets,
+        format_func=lambda item: f"{item.name} | {item.input_set_id}",
+        disabled=not input_sets,
+        key="dm_select_input_set",
+    )
+    if selected:
+        show_metadata_editor(
+            "input_set",
+            selected.input_set_id,
+            selected.name,
+            selected.notes,
+            lambda name, notes: update_input_set_metadata(db_file, selected.input_set_id, name=name, notes=notes),
+        )
+        show_delete_preview_and_action(
+            entity_type="input_set",
+            entity_id=selected.input_set_id,
+            preview_fn=lambda: preview_delete_input_set(db_file, selected.input_set_id, workspace=config.workspace),
+            delete_fn=lambda: delete_input_set(db_file, selected.input_set_id, workspace=config.workspace),
+        )
+
+
+def show_legacy_task_data_management(config, db_file: Path) -> None:
+    conn = connect_to_legacy_tasks(db_file)
+    try:
+        tasks = list_tasks(conn)
+    finally:
+        conn.close()
+    if tasks:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        tr("table.task_id"): task.task_id,
+                        tr("table.name"): task.name,
+                        tr("table.status"): status_label(task.status),
+                        tr("table.pid"): task.pid,
+                        tr("table.task_root"): str(task.task_root),
+                        tr("table.updated_at"): task.updated_at,
+                    }
+                    for task in tasks
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(tr("data_management.no_records"))
+    selected = st.selectbox(
+        tr("data_management.select_legacy_task"),
+        tasks,
+        format_func=lambda task: f"{task.name or task.task_id} | {task.task_id}",
+        disabled=not tasks,
+        key="dm_select_legacy_task",
+    )
+    if selected:
+        show_metadata_editor(
+            "legacy_task",
+            selected.task_id,
+            selected.name or selected.project,
+            selected.notes or "",
+            lambda name, notes: update_legacy_task_metadata(db_file, selected.task_id, name=name, notes=notes),
+        )
+        show_delete_preview_and_action(
+            entity_type="legacy_task",
+            entity_id=selected.task_id,
+            preview_fn=lambda: preview_delete_legacy_task(db_file, selected.task_id, workspace=config.workspace),
+            delete_fn=lambda: delete_legacy_task(db_file, selected.task_id, workspace=config.workspace),
+        )
+
+
+def show_metadata_editor(entity_type: str, entity_id: str, name: str | None, notes: str | None, save_fn) -> None:
+    with st.expander(tr("data_management.edit_metadata"), expanded=False):
+        st.caption(tr("data_management.id_locked", entity_id=entity_id))
+        name_value = st.text_input(tr("data_management.name"), value=name or "", key=f"dm_name_{entity_type}_{entity_id}")
+        notes_value = st.text_area(tr("data_management.notes"), value=notes or "", key=f"dm_notes_{entity_type}_{entity_id}")
+        if st.button(tr("data_management.save"), key=f"dm_save_{entity_type}_{entity_id}"):
+            try:
+                save_fn(name_value, notes_value)
+                st.success(tr("data_management.save_success"))
+                st.rerun()
+            except Exception as exc:
+                st.error(tr("data_management.save_failed", error=str(exc)))
+
+
+def show_delete_preview_and_action(entity_type: str, entity_id: str, preview_fn, delete_fn) -> None:
+    with st.expander(tr("data_management.delete_confirm"), expanded=False):
+        preview = preview_fn()
+        show_delete_result(preview, title_key="data_management.delete_preview")
+        confirm = st.checkbox(
+            tr("data_management.delete_checkbox", entity_id=entity_id),
+            key=f"dm_confirm_delete_{entity_type}_{entity_id}",
+        )
+        typed = st.text_input(
+            tr("data_management.delete_type_id", entity_id=entity_id),
+            key=f"dm_delete_text_{entity_type}_{entity_id}",
+        )
+        if st.button(
+            tr("data_management.delete_selected"),
+            disabled=not confirm or typed != entity_id,
+            key=f"dm_delete_{entity_type}_{entity_id}",
+        ):
+            try:
+                result = delete_fn()
+                show_delete_result(result, title_key="data_management.delete_result")
+                if result.ok:
+                    st.success(tr("data_management.delete_success"))
+                    st.rerun()
+                else:
+                    st.error(tr("data_management.delete_failed"))
+            except Exception as exc:
+                st.error(tr("data_management.delete_failed_with_error", error=str(exc)))
+
+
+def show_factory_reset_section(config, db_file: Path) -> None:
+    st.warning(tr("data_management.factory_reset_warning"))
+    preview = preview_factory_reset(db_file, workspace=config.workspace)
+    show_delete_result(preview, title_key="data_management.factory_reset_preview")
+    if preview.backup_path:
+        st.info(tr("data_management.backup_path", path=preview.backup_path))
+    confirm_text = st.text_input(tr("data_management.factory_reset_confirm_text"), key="dm_factory_reset_text")
+    confirmed = st.checkbox(tr("data_management.factory_reset_checkbox"), key="dm_factory_reset_checkbox")
+    if st.button(
+        tr("data_management.factory_reset_button"),
+        disabled=confirm_text != "CLEAR ALL" or not confirmed,
+        key="dm_factory_reset_button",
+    ):
+        try:
+            result = factory_reset(db_file, workspace=config.workspace)
+            show_delete_result(result, title_key="data_management.factory_reset_result")
+            if result.backup_path:
+                st.info(tr("data_management.backup_path", path=result.backup_path))
+            if result.ok:
+                st.success(tr("data_management.factory_reset_success"))
+                st.rerun()
+            else:
+                st.error(tr("data_management.factory_reset_failed"))
+        except Exception as exc:
+            st.error(tr("data_management.factory_reset_failed_with_error", error=str(exc)))
+
+
+def show_delete_result(result, title_key: str) -> None:
+    st.markdown(f"**{tr(title_key)}**")
+    if result.deleted_db_records:
+        st.write(tr("data_management.deleted_db_records"))
+        st.code("\n".join(result.deleted_db_records), language="text")
+    if result.deleted_paths:
+        st.write(tr("data_management.deleted_paths"))
+        st.code("\n".join(result.deleted_paths), language="text")
+    if result.skipped_paths:
+        st.write(tr("data_management.skipped_paths"))
+        st.code("\n".join(result.skipped_paths), language="text")
+    if result.warnings:
+        st.warning("\n".join(result.warnings))
+    if result.errors:
+        st.error("\n".join(result.errors))
+
 def show_adsorption_workflow_page(config, db_file: Path) -> None:
     show_create_adsorption_workflow_form(config, db_file)
     st.divider()
@@ -1192,11 +1551,18 @@ def show_create_adsorption_workflow_form(config, db_file: Path) -> None:
     if not usable_sets:
         st.warning(tr("warning.adsorption_no_usable_input_sets"))
         return
+    if "adsorption_method_notes_text" not in st.session_state:
+        st.session_state["adsorption_method_notes_text"] = generate_method_description(
+            method_family="DFT",
+            functional="PBE",
+            system_type="adsorption",
+        )
 
     with st.form("create_adsorption_workflow_form"):
         workflow_name = st.text_input(
             tr("adsorption.workflow.name"),
-            value=tr("adsorption.workflow.default_name"),
+            value="",
+            placeholder=tr("adsorption.workflow.default_name"),
         )
         adsorbate_name = st.text_input(
             tr("adsorption.workflow.adsorbate_name"),
@@ -1207,13 +1573,16 @@ def show_create_adsorption_workflow_form(config, db_file: Path) -> None:
             tr("adsorption.workflow.method_family"),
             ADSORPTION_METHOD_FAMILIES,
             format_func=lambda value: adsorption_choice_label("adsorption.method_family", value),
+            key="adsorption_method_family",
         )
         functional = st.selectbox(
             tr("adsorption.workflow.functional"),
             ADSORPTION_FUNCTIONALS,
             format_func=lambda value: adsorption_choice_label("adsorption.functional", value),
+            key="adsorption_functional",
         )
-        method_notes = st.text_area(tr("adsorption.workflow.method_notes"))
+        st.caption(tr("method_advisor.generated_description"))
+        method_notes = st.text_area(tr("adsorption.workflow.method_notes"), key="adsorption_method_notes_text")
         selections = {
             "clean_slab": st.selectbox(
                 tr("adsorption.workflow.input_set.clean_slab"),
@@ -1232,16 +1601,33 @@ def show_create_adsorption_workflow_form(config, db_file: Path) -> None:
             ),
         }
         notes = st.text_area(tr("adsorption.workflow.notes"))
+        regenerate_method = st.form_submit_button(tr("method_advisor.regenerate"))
         submitted = st.form_submit_button(tr("button.create_adsorption_workflow"), type="primary")
 
+    if regenerate_method:
+        st.session_state["adsorption_method_notes_text"] = generate_method_description(
+            method_family=method_family,
+            functional=functional,
+            system_type="adsorption",
+            adsorbate_name=adsorbate_name,
+        )
+        st.rerun()
+
     if submitted:
+        normalized_workflow_name = workflow_name.strip()
+        if not normalized_workflow_name:
+            st.error(tr("workflow.name_required"))
+            return
+        if workflow_name_exists(db_file, normalized_workflow_name):
+            st.error(tr("workflow.name_duplicate"))
+            return
         workflow_id = new_adsorption_workflow_id(adsorbate_name or workflow_name)
         root_dir = Path(config.workspace) / "workflows" / workflow_id
         try:
             workflow = create_adsorption_workflow(
                 db_file,
                 workflow_id=workflow_id,
-                name=workflow_name.strip() or workflow_id,
+                name=normalized_workflow_name,
                 root_dir=root_dir,
                 clean_slab_input_set_id=selections["clean_slab"].input_set_id,
                 molecule_ref_input_set_id=selections["molecule_ref"].input_set_id,
@@ -1924,6 +2310,8 @@ def main() -> None:
         show_module_placeholder_page("nav.molecule_optimization")
     elif selected_page == "jobs_logs":
         show_jobs_logs_page(db_file)
+    elif selected_page == "data_management":
+        show_data_management_page(config, db_file)
     elif selected_page == "settings":
         show_settings_page()
 

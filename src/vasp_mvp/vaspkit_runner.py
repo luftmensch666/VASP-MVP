@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from .input_set_validation import parse_potcar_summary
+
 
 # dry-run 只用于 UI 和流程联调，不能生成、展示或伪造真实 POTCAR。
 DRY_RUN_POTCAR_WARNING = (
@@ -34,6 +36,7 @@ class VaspkitRequest:
     workspace: Path | None = None
     input_set_id: str | None = None
     input_set_name: str = ""
+    input_set_notes: str = ""
     uploaded_cif_path: Path | None = None
     # 兼容旧版 vaspkit_request.json；新逻辑忽略该字段，始终完整生成四件套。
     generation_mode: str = "full"
@@ -333,37 +336,10 @@ def _generate_full_vasp_input_set(request: VaspkitRequest, warnings: list[str]) 
 
 
 def summarize_potcar(path: Path) -> dict:
-    if not path.exists():
-        return {
-            "exists": False,
-            "size_bytes": 0,
-            "sha256": None,
-            "titel_lines": [],
-            "potential_order": [],
-            "element_order": [],
-        }
-    titel_lines: list[str] = []
-    potential_order: list[str] = []
-    element_order: list[str] = []
-    with path.open("r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            if line.startswith("TITEL"):
-                title = line.strip()
-                titel_lines.append(title)
-                potential = _potential_from_titel(title)
-                if potential:
-                    potential_order.append(potential)
-                    element = _element_from_potential(potential)
-                    if element:
-                        element_order.append(element)
-    return {
-        "exists": True,
-        "size_bytes": path.stat().st_size,
-        "sha256": sha256_file(path),
-        "titel_lines": titel_lines,
-        "potential_order": potential_order,
-        "element_order": element_order,
-    }
+    summary = parse_potcar_summary(path).to_dict()
+    # 兼容旧 UI/JSON 字段名，同时新增更完整的 POTCAR 摘要字段。
+    summary["potential_order"] = summary.get("potential_labels", [])
+    return summary
 
 
 def sha256_file(path: Path) -> str:
@@ -597,7 +573,7 @@ def _finalize_input_set_artifacts(request: VaspkitRequest, result: VaspkitResult
             "potcar_path": str(root_dir / "POTCAR"),
             "created_at": now,
             "updated_at": now,
-            "notes": "dry_run: no real POTCAR" if result.dry_run else "",
+            "notes": request.input_set_notes or ("dry_run: no real POTCAR" if result.dry_run else ""),
         },
     )
     finalized = VaspkitResult(

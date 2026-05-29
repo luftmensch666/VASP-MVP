@@ -11,6 +11,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from vasp_mvp.db import db_path, init_db
+from vasp_mvp.data_management import update_workflow_metadata
 from vasp_mvp.jobs import create_job
 from vasp_mvp.workflows import (
     bind_job_to_workflow,
@@ -117,6 +118,67 @@ class WorkflowsTest(unittest.TestCase):
             self.assertIsNotNone(workflow_with_jobs)
             self.assertEqual(workflow_with_jobs[0].workflow_id, "wf-1")
             self.assertEqual(len(workflow_with_jobs[1]), 2)
+
+    def test_workflow_name_required_and_normalized_duplicate_checks(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            init_db(workspace).close()
+            database = db_path(workspace)
+
+            create_workflow(
+                database,
+                workflow_id="wf-1",
+                workflow_type="adsorption",
+                name=" NH3 Adsorption ",
+                root_dir=workspace / "workflows" / "wf-1",
+            )
+
+            with self.assertRaisesRegex(ValueError, "name_duplicate"):
+                create_workflow(
+                    database,
+                    workflow_id="wf-2",
+                    workflow_type="adsorption",
+                    name="nh3 adsorption",
+                    root_dir=workspace / "workflows" / "wf-2",
+                )
+            create_workflow(
+                database,
+                workflow_id="wf-2",
+                workflow_type="adsorption",
+                name="CO Adsorption",
+                root_dir=workspace / "workflows" / "wf-2",
+            )
+            with self.assertRaisesRegex(ValueError, "name_duplicate"):
+                update_workflow_metadata(database, "wf-2", name=" nh3 adsorption ")
+            with self.assertRaisesRegex(ValueError, "name_required"):
+                create_workflow(
+                    database,
+                    workflow_id="wf-empty",
+                    workflow_type="adsorption",
+                    name="  ",
+                    root_dir=workspace / "workflows" / "wf-empty",
+                )
+
+    def test_workflow_notes_edit_does_not_overwrite_method_notes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            init_db(workspace).close()
+            database = db_path(workspace)
+            create_workflow(
+                database,
+                workflow_id="wf-notes",
+                workflow_type="adsorption",
+                name="notes workflow",
+                root_dir=workspace / "workflows" / "wf-notes",
+                method_notes="PBE-D3 method description",
+                notes="ordinary note",
+            )
+
+            update_workflow_metadata(database, "wf-notes", notes="edited ordinary note")
+            loaded = get_workflow(database, "wf-notes")
+
+            self.assertEqual(loaded.notes, "edited ordinary note")
+            self.assertEqual(loaded.method_notes, "PBE-D3 method description")
 
 
 if __name__ == "__main__":

@@ -112,6 +112,8 @@ class TaskRecord:
     start_time: datetime | None = None
     end_time: datetime | None = None
     return_code: int | None = None
+    name: str | None = None
+    notes: str | None = None
 
     @property
     def path(self) -> Path:
@@ -158,6 +160,8 @@ class JobRecord:
     return_code: int | None = None
     mpi_ranks: int | None = None
     vasp_bin: str | None = None
+    name: str | None = None
+    notes: str | None = None
 
 
 @dataclass(frozen=True)
