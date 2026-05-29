@@ -169,6 +169,8 @@ def save_job_metrics(
     避免把 OSZICAR 中间能量或手动输入能量误当作最终能量。
     """
 
+    stored_energy_source = energy_source or "OUTCAR"
+    stored_energy_label = energy_label or "final TOTEN"
     with _connect(db_path) as conn:
         conn.execute(
             """
@@ -199,8 +201,8 @@ def save_job_metrics(
                 _bool_to_db(getattr(metrics, "electronic_converged", None)),
                 json.dumps(list(getattr(metrics, "oszicar_steps", ()) or [])),
                 json.dumps(list(getattr(metrics, "errors", ()) or [])),
-                energy_source,
-                energy_label,
+                stored_energy_source,
+                stored_energy_label,
                 _now(),
             ),
         )
