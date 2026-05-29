@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from .config import load_app_config
 from .jobs import get_job, update_job_status
 from .models import JobRecord
 from .runner import launch_vasp_process, stop_task
@@ -33,7 +34,7 @@ def start_workflow_job(
 
     now = datetime.utcnow()
     if dry_run:
-        _write_dry_run_outputs(job.run_dir)
+        _write_dry_run_outputs(job)
         update_job_status(
             db_path,
             job_id,
@@ -44,11 +45,9 @@ def start_workflow_job(
         )
         return _require_job(db_path, job_id)
 
-    if job.mpi_ranks is None:
-        raise ValueError(f"Workflow job is missing mpi_ranks: {job_id}")
-    if not job.vasp_bin:
-        raise ValueError(f"Workflow job is missing vasp_bin: {job_id}")
-    pid = launch_vasp_process(job.run_dir, job.vasp_bin, job.mpi_ranks)
+    vasp_bin, mpi_ranks = _resolve_launch_settings(job)
+    _backup_existing_logs(job.run_dir)
+    pid = launch_vasp_process(job.run_dir, vasp_bin, mpi_ranks)
     update_job_status(db_path, job_id, "running", pid=pid, start_time=now)
     return _require_job(db_path, job_id)
 
@@ -136,17 +135,58 @@ def _missing_vasp_inputs(run_dir: Path) -> list[str]:
     ]
 
 
-def _write_dry_run_outputs(run_dir: Path) -> None:
-    workdir = Path(run_dir)
+def _resolve_launch_settings(job: JobRecord) -> tuple[str | Path, int]:
+    """解析真实 VASP 启动参数。
+
+    优先使用 job 自己保存的 vasp_bin/mpi_ranks；为空时才回退到默认配置。
+    这样后续同一 workflow 内不同 job 可以使用不同并行规模。
+    """
+
+    config = None
+    vasp_bin: str | Path | None = job.vasp_bin
+    mpi_ranks: int | None = job.mpi_ranks
+    if not vasp_bin or mpi_ranks is None:
+        config = load_app_config()
+    if not vasp_bin:
+        vasp_bin = config.vasp_bin if config is not None else None
+    if mpi_ranks is None:
+        mpi_ranks = config.default_mpi_ranks if config is not None else None
+    if not vasp_bin:
+        raise ValueError(f"Workflow job is missing vasp_bin: {job.job_id}")
+    if mpi_ranks is None:
+        raise ValueError(f"Workflow job is missing mpi_ranks: {job.job_id}")
+    return vasp_bin, int(mpi_ranks)
+
+
+def _backup_existing_logs(run_dir: Path) -> list[Path]:
+    """真实 VASP 启动前备份旧日志，避免静默覆盖用户已有输出。"""
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    backups: list[Path] = []
+    for filename in ("vasp.out", "OSZICAR"):
+        path = Path(run_dir) / filename
+        if path.exists() and path.is_file():
+            backup = path.with_name(f"{filename}.{timestamp}.bak")
+            path.rename(backup)
+            backups.append(backup)
+    return backups
+
+
+def _write_dry_run_outputs(job: JobRecord) -> None:
+    workdir = Path(job.run_dir)
     workdir.mkdir(parents=True, exist_ok=True)
     (workdir / "vasp.out").write_text(
-        "DRY RUN: Workflow job VASP calculation was not started.\n"
-        "dry run completed successfully\n",
+        "DRY-RUN VASP JOB\n"
+        f"job_id: {job.job_id}\n"
+        f"run_dir: {workdir}\n"
+        "This is not a real VASP calculation. No mpirun or vasp_std process was started.\n"
+        "dry-run completed successfully\n",
         encoding="utf-8",
     )
     (workdir / "OSZICAR").write_text(
         " 1 F= -.10000000E+02 E0= -.10000000E+02 d E =0\n"
-        " 2 F= -.10500000E+02 E0= -.10500000E+02 d E =-.5\n",
+        " 2 F= -.10500000E+02 E0= -.10500000E+02 d E =-.5\n"
+        " 3 F= -.10550000E+02 E0= -.10550000E+02 d E =-.05\n",
         encoding="utf-8",
     )
 

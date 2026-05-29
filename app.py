@@ -1301,7 +1301,7 @@ def show_adsorption_workflow_detail(db_file: Path, workflow_id: str) -> None:
 def show_workflow_job_controls(db_file: Path, job_id: str) -> None:
     st.caption(tr("workflow_job.monitoring"))
     action_cols = st.columns(4)
-    if action_cols[0].button(tr("button.start_dry_run"), key=f"wf_start_dry_{job_id}"):
+    if action_cols[0].button(tr("workflow_job.start_dry_run"), key=f"wf_start_dry_{job_id}"):
         try:
             updated = start_workflow_job(db_file, job_id=job_id, dry_run=True)
             st.success(tr("workflow_job.dry_run_finished", job_id=updated.job_id))
@@ -1310,19 +1310,22 @@ def show_workflow_job_controls(db_file: Path, job_id: str) -> None:
             st.error(str(exc))
 
     confirm_key = f"wf_real_confirm_{job_id}"
-    st.checkbox(tr("workflow_job.real_vasp_confirm"), key=confirm_key)
-    if action_cols[1].button(tr("button.start_real_vasp"), key=f"wf_start_real_{job_id}"):
-        if not st.session_state.get(confirm_key, False):
-            st.warning(tr("workflow_job.real_vasp_not_confirmed"))
-        else:
-            try:
-                updated = start_workflow_job(db_file, job_id=job_id, dry_run=False)
-                st.success(tr("success.workflow_job_started", job_id=updated.job_id))
-                st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
+    real_confirmed = st.checkbox(tr("workflow_job.real_vasp_confirm"), key=confirm_key)
+    if not real_confirmed:
+        st.warning(tr("workflow_job.real_vasp_not_confirmed"))
+    if action_cols[1].button(
+        tr("workflow_job.start_real_vasp"),
+        key=f"wf_start_real_{job_id}",
+        disabled=not real_confirmed,
+    ):
+        try:
+            updated = start_workflow_job(db_file, job_id=job_id, dry_run=False)
+            st.success(tr("success.workflow_job_started", job_id=updated.job_id))
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
 
-    if action_cols[2].button(tr("button.stop_job"), key=f"wf_stop_{job_id}"):
+    if action_cols[2].button(tr("workflow_job.stop_job"), key=f"wf_stop_{job_id}"):
         try:
             updated = stop_workflow_job(db_file, job_id=job_id)
             st.success(tr("success.workflow_job_stopped", job_id=updated.job_id, status=status_label(updated.status)))
@@ -1330,7 +1333,7 @@ def show_workflow_job_controls(db_file: Path, job_id: str) -> None:
         except Exception as exc:
             st.error(str(exc))
 
-    if action_cols[3].button(tr("button.refresh_job"), key=f"wf_refresh_{job_id}"):
+    if action_cols[3].button(tr("workflow_job.refresh_button"), key=f"wf_refresh_{job_id}"):
         try:
             updated = refresh_workflow_job_status(db_file, job_id)
             st.info(tr("workflow_job.refresh", job_id=updated.job_id, status=status_label(updated.status)))
@@ -1341,7 +1344,8 @@ def show_workflow_job_controls(db_file: Path, job_id: str) -> None:
 
 def show_workflow_job_logs(db_file: Path, job_id: str) -> None:
     paths = get_workflow_job_log_paths(db_file, job_id)
-    st.write({tr("workflow_job.outcar_exists"): bool_label(paths["OUTCAR"]["exists"])})
+    outcar_key = "workflow_job.outcar_exists" if paths["OUTCAR"]["exists"] else "workflow_job.outcar_missing"
+    st.write({tr("workflow_job.outcar_exists"): tr(outcar_key)})
     with st.expander(tr("workflow_job.vasp_out_tail"), expanded=False):
         try:
             st.code(tail_workflow_job_file(db_file, job_id, "vasp.out"), language="text")

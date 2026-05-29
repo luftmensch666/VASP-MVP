@@ -4,6 +4,8 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -33,7 +35,11 @@ class WorkflowRunnerTest(unittest.TestCase):
             self.assertIsNotNone(job.end_time)
             self.assertTrue((run_dir / "vasp.out").exists())
             self.assertTrue((run_dir / "OSZICAR").exists())
-            self.assertIn("DRY RUN", (run_dir / "vasp.out").read_text(encoding="utf-8"))
+            vasp_out = (run_dir / "vasp.out").read_text(encoding="utf-8")
+            self.assertIn("DRY-RUN VASP JOB", vasp_out)
+            self.assertIn("job_id: job-1", vasp_out)
+            self.assertIn(str(run_dir), vasp_out)
+            self.assertIn("not a real VASP calculation", vasp_out)
 
     def test_start_rejects_missing_vasp_input_file(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -83,8 +89,44 @@ class WorkflowRunnerTest(unittest.TestCase):
             self.assertTrue(paths["OUTCAR"]["exists"])
             self.assertIn("OUTCAR", paths["OUTCAR"]["path"])
 
+    def test_real_start_uses_job_launch_settings_and_backs_up_existing_logs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            database, run_dir = _create_job_with_inputs(Path(tmp), mpi_ranks=6, vasp_bin="/job/vasp_std")
+            (run_dir / "vasp.out").write_text("old out\n", encoding="utf-8")
+            (run_dir / "OSZICAR").write_text("old oszicar\n", encoding="utf-8")
 
-def _create_job_with_inputs(tmp: Path, *, status: str = "committed") -> tuple[Path, Path]:
+            with patch("vasp_mvp.workflow_runner.launch_vasp_process", return_value=4321) as launch:
+                job = start_workflow_job(database, job_id="job-1", dry_run=False)
+
+            self.assertEqual(job.status, "running")
+            self.assertEqual(job.pid, 4321)
+            launch.assert_called_once_with(run_dir, "/job/vasp_std", 6)
+            self.assertFalse((run_dir / "vasp.out").exists())
+            self.assertFalse((run_dir / "OSZICAR").exists())
+            self.assertEqual(len(list(run_dir.glob("vasp.out.*.bak"))), 1)
+            self.assertEqual(len(list(run_dir.glob("OSZICAR.*.bak"))), 1)
+
+    def test_real_start_falls_back_to_default_config_when_job_settings_are_empty(self) -> None:
+        with TemporaryDirectory() as tmp:
+            database, run_dir = _create_job_with_inputs(Path(tmp), mpi_ranks=None, vasp_bin=None)
+            fake_config = SimpleNamespace(vasp_bin=Path("/config/vasp_std"), default_mpi_ranks=12)
+
+            with patch("vasp_mvp.workflow_runner.load_app_config", return_value=fake_config):
+                with patch("vasp_mvp.workflow_runner.launch_vasp_process", return_value=9876) as launch:
+                    job = start_workflow_job(database, job_id="job-1", dry_run=False)
+
+            self.assertEqual(job.status, "running")
+            self.assertEqual(job.pid, 9876)
+            launch.assert_called_once_with(run_dir, Path("/config/vasp_std"), 12)
+
+
+def _create_job_with_inputs(
+    tmp: Path,
+    *,
+    status: str = "committed",
+    mpi_ranks: int | None = 20,
+    vasp_bin: str | None = "/bin/false",
+) -> tuple[Path, Path]:
     workspace = tmp / "workspace"
     init_db(workspace).close()
     database = db_path(workspace)
@@ -98,8 +140,8 @@ def _create_job_with_inputs(tmp: Path, *, status: str = "committed") -> tuple[Pa
         calculation_type="static",
         status=status,
         run_dir=run_dir,
-        mpi_ranks=20,
-        vasp_bin="/bin/false",
+        mpi_ranks=mpi_ranks,
+        vasp_bin=vasp_bin,
     )
     return database, run_dir
 
