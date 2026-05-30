@@ -19,7 +19,26 @@ WIZARD_STEPS = (
     "run_static_jobs",
     "calculate_eads",
 )
+
+# Adsorption Wizard 的 relax 阶段 role 元数据集中定义在这里。
+# UI、输入文件生成和 job 创建都从同一处引用，避免 app.py 或后端模块各自
+# 硬编码一份 role 列表，导致 Step 4/5 运行时出现未定义或顺序不一致。
 RELAX_ROLES = ("clean_relax", "molecule_relax", "adsorbed_relax")
+RELAX_ROLE_LABELS = {
+    "clean_relax": "Clean relax",
+    "molecule_relax": "Molecule relax",
+    "adsorbed_relax": "Adsorbed relax",
+}
+RELAX_STEP_ORDER = {
+    "clean_relax": 1,
+    "molecule_relax": 2,
+    "adsorbed_relax": 3,
+}
+RELAX_CALCULATION_TYPES = {
+    "clean_relax": "relax",
+    "molecule_relax": "molecule_relax",
+    "adsorbed_relax": "relax",
+}
 STATIC_EADS_ROLES = ("clean_static", "molecule_static", "adsorbed_static")
 STEP_ARTIFACTS = {
     "clean_structure": "artifacts/clean/POSCAR",

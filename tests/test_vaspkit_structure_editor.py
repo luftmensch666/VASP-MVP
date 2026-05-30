@@ -13,6 +13,9 @@ if str(SRC) not in sys.path:
 
 from vasp_mvp.vaspkit_structure_editor import (
     build_105_inputs,
+    build_601_inputs,
+    build_602_inputs,
+    build_603_inputs,
     build_401_inputs,
     build_801_inputs,
     build_803_inputs,
@@ -35,6 +38,9 @@ from vasp_mvp.vaspkit_structure_editor import (
 class VaspkitStructureEditorTest(unittest.TestCase):
     def test_build_inputs_for_measured_structure_steps(self) -> None:
         self.assertEqual(build_105_inputs("sample.cif", "O Ce"), ["105", "sample.cif", "O Ce"])
+        self.assertEqual(build_601_inputs(), ["601"])
+        self.assertEqual(build_602_inputs(), ["602"])
+        self.assertEqual(build_603_inputs(), ["603"])
         self.assertEqual(build_801_inputs(3, 18.5), ["801", "3", "18.5"])
         self.assertEqual(build_803_inputs(1, 1, 0, "1-3", 0.0, 15), ["803", "1 1 0", "1-3", "0", "15"])
         self.assertEqual(build_401_inputs(1, 2, 3), ["401", "1", "1 2 3"])
@@ -125,6 +131,57 @@ class VaspkitStructureEditorTest(unittest.TestCase):
             self.assertIn("VASPKIT exited with return code 2", result.errors)
             self.assertIn("Expected output file was not generated", "; ".join(result.errors))
             self.assertEqual((workflow_root / "logs" / "structure_801.out").read_text(encoding="utf-8"), "failed stdout")
+
+    def test_stdout_only_601_does_not_require_output_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workflow_root = Path(tmp)
+            cwd = workflow_root / "structure"
+            cwd.mkdir()
+            completed = Mock()
+            completed.returncode = 0
+            completed.stdout = "symmetry summary"
+            completed.stderr = ""
+
+            with patch("vasp_mvp.vaspkit_structure_editor.subprocess.run", return_value=completed):
+                result = run_vaspkit_structure_step(
+                    "vaspkit",
+                    build_601_inputs(),
+                    cwd,
+                    "601",
+                    None,
+                )
+
+            self.assertTrue(result.ok)
+            self.assertIsNone(result.output_path)
+            self.assertEqual((workflow_root / "logs" / "structure_601.out").read_text(encoding="utf-8"), "symmetry summary")
+
+    def test_602_and_603_expected_outputs_are_checked(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workflow_root = Path(tmp)
+            cwd = workflow_root / "structure"
+            cwd.mkdir()
+            completed = Mock()
+            completed.returncode = 0
+            completed.stdout = "ok"
+            completed.stderr = ""
+
+            def fake_run_602(*args, **kwargs):
+                (cwd / "PRIMCELL.vasp").write_text("POSCAR\n", encoding="utf-8")
+                return completed
+
+            with patch("vasp_mvp.vaspkit_structure_editor.subprocess.run", side_effect=fake_run_602):
+                result_602 = run_vaspkit_structure_step("vaspkit", build_602_inputs(), cwd, "602", "PRIMCELL.vasp")
+            self.assertTrue(result_602.ok)
+            self.assertEqual(result_602.output_path, cwd / "PRIMCELL.vasp")
+
+            def fake_run_603(*args, **kwargs):
+                (cwd / "CONVCELL.vasp").write_text("POSCAR\n", encoding="utf-8")
+                return completed
+
+            with patch("vasp_mvp.vaspkit_structure_editor.subprocess.run", side_effect=fake_run_603):
+                result_603 = run_vaspkit_structure_step("vaspkit", build_603_inputs(), cwd, "603", "CONVCELL.vasp")
+            self.assertTrue(result_603.ok)
+            self.assertEqual(result_603.output_path, cwd / "CONVCELL.vasp")
 
     def test_invalid_parameters_are_rejected_without_subprocess_call(self) -> None:
         with patch("vasp_mvp.vaspkit_structure_editor.subprocess.run") as run:

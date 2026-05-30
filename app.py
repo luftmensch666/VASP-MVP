@@ -29,6 +29,8 @@ from vasp_mvp.adsorption_visualization import (
     format_energy as format_visual_energy,
 )
 from vasp_mvp.adsorption_wizard import (
+    RELAX_ROLES,
+    RELAX_STEP_ORDER,
     WIZARD_STEPS,
     adopt_clean_poscar_candidate,
     artifact_path,
@@ -42,11 +44,25 @@ from vasp_mvp.adsorption_wizard import (
     sync_clean_poscar_to_structure,
 )
 from vasp_mvp.adsorption_wizard_relax import (
-    RELAX_STEP_ORDER,
     check_relax_source_poscars,
     check_relax_package_consistency,
     create_relax_jobs_from_inputs,
     generate_all_relax_input_packages,
+)
+from vasp_mvp.adsorption_wizard_clean_pipeline import (
+    CLEAN_SOURCE_TYPES,
+    bulk_contcar_exists,
+    can_run_clean_pipeline_step,
+    can_skip_clean_pipeline_step,
+    clean_pipeline_rows,
+    ensure_clean_pipeline,
+    get_next_enabled_clean_step,
+    mark_clean_pipeline_candidate_adopted,
+    mark_clean_pipeline_step_done,
+    mark_clean_pipeline_step_failed,
+    mark_clean_pipeline_step_skipped,
+    normalize_source_type,
+    reset_clean_pipeline_for_source_type_change,
 )
 from vasp_mvp.adsorption_workflow import create_adsorption_workflow
 from vasp_mvp.config import load_app_config, load_potcar_config
@@ -64,6 +80,7 @@ from vasp_mvp.data_management import (
     update_legacy_task_metadata,
     update_workflow_metadata,
 )
+from vasp_mvp.downloads import get_downloadable_text_file
 from vasp_mvp.db import connect, create_task, db_path as workspace_db_path, list_tasks, update_task_status
 from vasp_mvp.i18n import t
 from vasp_mvp.input_sets import (
@@ -90,8 +107,12 @@ from vasp_mvp.security import safe_task_id, task_dir
 from vasp_mvp.structure_io import read_structure_upload
 from vasp_mvp.vaspkit_options import get_vaspkit_section, validate_vaspkit_values
 from vasp_mvp.vaspkit_runner import VaspkitRequest, VaspkitResult, generate_vasp_inputs_with_vaspkit, sha256_file, summarize_potcar
+from vasp_mvp.vaspkit_step_docs import get_vaspkit_step_doc
 from vasp_mvp.vaspkit_structure_editor import (
     build_105_inputs,
+    build_601_inputs,
+    build_602_inputs,
+    build_603_inputs,
     build_401_inputs,
     build_801_inputs,
     build_803_inputs,
@@ -100,6 +121,11 @@ from vasp_mvp.vaspkit_structure_editor import (
     expected_401_output_name,
     expected_803_output_name,
     run_vaspkit_structure_step,
+)
+from vasp_mvp.vaspkit_symmetry_parser import (
+    analyze_porous_symmetry_summary,
+    infer_expected_guest_elements,
+    parse_vaspkit_601_summary,
 )
 from vasp_mvp.workflow_runner import (
     get_workflow_job_process_state,
@@ -1717,80 +1743,35 @@ def show_wizard_status_table(workflow_root: Path, state: dict) -> None:
 
 def show_wizard_step_clean_structure(config, workflow, state: dict) -> None:
     st.markdown(f"**{tr('adsorption_wizard.step.clean_structure')}**")
+    state = ensure_clean_pipeline(state)
+    if state != load_wizard_state(workflow.root_dir, workflow.workflow_id):
+        save_wizard_state(workflow.root_dir, state)
     source_type = st.selectbox(
-        tr("adsorption_wizard.source_type.label"),
-        ("already_slab", "porous_or_mof", "bulk_surface"),
+        tr("adsorption_wizard.clean_pipeline.source_type"),
+        CLEAN_SOURCE_TYPES,
         format_func=lambda value: tr(f"adsorption_wizard.source_type.{value}"),
+        index=CLEAN_SOURCE_TYPES.index(normalize_source_type(state.get("source_model_type"))),
         key=f"source_type_{workflow.workflow_id}",
     )
-    state["source_model_type"] = source_type
-    save_wizard_state(workflow.root_dir, state)
+    current_source_type = normalize_source_type(state.get("clean_pipeline", {}).get("source_type"))
+    if source_type != current_source_type:
+        st.warning(tr("adsorption_wizard.clean_pipeline.source_type_change_warning"))
+        if st.checkbox(tr("adsorption_wizard.clean_pipeline.confirm_source_type_change"), key=f"confirm_source_type_{workflow.workflow_id}"):
+            if st.button(tr("button.confirm"), key=f"apply_source_type_{workflow.workflow_id}"):
+                state = reset_clean_pipeline_for_source_type_change(state, source_type)
+                save_wizard_state(workflow.root_dir, state)
+                st.success(tr("success.saved"))
+                st.rerun()
+        return
+
     st.info(tr(f"adsorption_wizard.source_type.{source_type}.help"))
+    st.caption(tr("adsorption_wizard.clean_pipeline.only_selected_flow_visible"))
+    if source_type == "bulk_surface":
+        st.warning(tr("adsorption_wizard.clean_pipeline.bulk_relax_long_running"))
     vaspkit_bin = st.text_input(tr("vaspkit.bin.label"), "vaspkit", key=f"wizard_vaspkit_bin_{workflow.workflow_id}")
     show_current_clean_poscar(workflow.root_dir, state)
-    show_clean_poscar_candidate(workflow.root_dir, state)
-
-    tabs = st.tabs(
-        [
-            tr("adsorption_wizard.clean.upload_poscar"),
-            tr("adsorption_wizard.clean.cif_105"),
-            tr("adsorption_wizard.clean.optional_steps"),
-        ]
-    )
-    with tabs[0]:
-        uploaded = st.file_uploader(
-            tr("adsorption_wizard.clean.upload_poscar"),
-            key=f"clean_poscar_upload_{workflow.workflow_id}",
-        )
-        if uploaded is not None and st.button(tr("adsorption_wizard.save_candidate"), key=f"save_clean_upload_{workflow.workflow_id}"):
-            tmp = workflow.root_dir / "artifacts" / "clean" / "candidates" / Path(uploaded.name).name
-            tmp.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_bytes(uploaded.getvalue())
-            state = save_candidate_file(
-                workflow.root_dir,
-                state,
-                role="clean",
-                source_path=tmp,
-                candidate_name="uploaded_clean_POSCAR",
-                source_step="upload",
-                parameters={"filename": Path(uploaded.name).name},
-            )
-            st.success(tr("adsorption_wizard.candidate_saved"))
-            st.rerun()
-    with tabs[1]:
-        element_order = st.text_input(tr("adsorption_wizard.element_order_optional"), key=f"wizard_105_elements_{workflow.workflow_id}")
-        cif = st.file_uploader(tr("adsorption_wizard.clean.upload_cif"), type=["cif"], key=f"wizard_cif_{workflow.workflow_id}")
-        if st.button(tr("adsorption_wizard.structure_editor.run_105"), disabled=cif is None, key=f"wizard_run_105_{workflow.workflow_id}"):
-            try:
-                workdir = workflow.root_dir / "structure"
-                workdir.mkdir(parents=True, exist_ok=True)
-                cif_path = workdir / Path(cif.name).name
-                cif_path.write_bytes(cif.getvalue())
-                result = run_vaspkit_structure_step(
-                    vaspkit_bin,
-                    build_105_inputs(cif_path.name, element_order),
-                    workdir,
-                    "105",
-                    "POSCAR",
-                )
-                if not result.ok:
-                    show_structure_edit_failure(result)
-                else:
-                    save_candidate_file(
-                        workflow.root_dir,
-                        state,
-                        role="clean",
-                        source_path=result.output_path,
-                        candidate_name="POSCAR_105.vasp",
-                        source_step="105",
-                        parameters={"cif_filename": cif_path.name, "element_order": element_order.strip()},
-                    )
-                    st.success(tr("adsorption_wizard.structure_editor.candidate_created"))
-                    st.rerun()
-            except Exception as exc:
-                st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
-    with tabs[2]:
-        show_structure_edit_forms(workflow, state, vaspkit_bin)
+    show_clean_pipeline_table(workflow.root_dir, state)
+    show_clean_pipeline_steps(workflow, state, vaspkit_bin)
 
 
 def show_current_clean_poscar(workflow_root: Path, state: dict) -> None:
@@ -1798,7 +1779,361 @@ def show_current_clean_poscar(workflow_root: Path, state: dict) -> None:
     if not clean_rel:
         st.warning(tr("adsorption_wizard.clean_poscar_missing"))
         return
-    show_poscar_summary_block(tr("adsorption_wizard.current_clean_poscar"), artifact_path(workflow_root, clean_rel), workflow_root)
+    clean_path = artifact_path(workflow_root, clean_rel)
+    show_poscar_summary_block(tr("adsorption_wizard.current_clean_poscar"), clean_path, workflow_root)
+    show_safe_download_button(clean_path, workflow_root, tr("adsorption_wizard.download.current_clean_poscar"), key=f"download_clean_{clean_rel}")
+
+
+def show_clean_pipeline_table(workflow_root: Path, state: dict) -> None:
+    """显示当前 source_type 对应的 Step 1 分支流程，不混入其他分支步骤。"""
+
+    rows = []
+    for index, step in enumerate(clean_pipeline_rows(state), start=1):
+        candidate = step.get("candidate") or ""
+        rows.append(
+            {
+                tr("adsorption_wizard.step_number"): index,
+                tr("adsorption_wizard.step_name"): tr(step.get("label_key", "")),
+                tr("table.required"): bool_label(step.get("required")),
+                tr("table.status"): tr(f"adsorption_wizard.status.{step.get('status', 'pending')}"),
+                tr("adsorption_wizard.clean_pipeline.candidate_file"): candidate,
+                tr("table.exists"): bool_label(bool(candidate) and artifact_path(workflow_root, candidate).exists()),
+            }
+        )
+    st.markdown(f"**{tr('adsorption_wizard.clean_pipeline.title')}**")
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def show_clean_pipeline_steps(workflow, state: dict, vaspkit_bin: str) -> None:
+    next_enabled = get_next_enabled_clean_step(state, workflow.root_dir)
+    for step in clean_pipeline_rows(state):
+        step_key = step["key"]
+        expanded = step_key == next_enabled or step.get("status") == "failed"
+        with st.expander(tr(step["label_key"]), expanded=expanded):
+            show_step_doc(step["key"])
+            description_key = step.get("description_key")
+            if description_key:
+                st.caption(tr(description_key))
+            if step.get("disabled"):
+                st.info(tr("adsorption_wizard.clean_pipeline.step_coming_later"))
+                continue
+            if step_key == "slab_803" and not bulk_contcar_exists(workflow.root_dir):
+                st.warning(tr("adsorption_wizard.clean_pipeline.contcar_required_for_slab"))
+            enabled = can_run_clean_pipeline_step(state, step_key, workflow.root_dir)
+            if not enabled and step.get("status") == "pending":
+                st.warning(tr("adsorption_wizard.clean_pipeline.step_locked"))
+
+            if can_skip_clean_pipeline_step(state, step_key):
+                if st.button(tr("adsorption_wizard.clean_pipeline.skip_step"), key=f"skip_{step_key}_{workflow.workflow_id}"):
+                    try:
+                        state = mark_clean_pipeline_step_skipped(state, step_key)
+                        save_wizard_state(workflow.root_dir, state)
+                        st.success(tr("success.saved"))
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+            elif not step.get("required") and step.get("status") == "pending":
+                st.caption(tr("adsorption_wizard.clean_pipeline.optional_step_locked"))
+            elif step.get("required") and step.get("status") == "pending":
+                st.caption(tr("adsorption_wizard.clean_pipeline.required_cannot_skip"))
+
+            show_clean_pipeline_step_action(workflow, state, step, vaspkit_bin, enabled)
+
+
+def show_clean_pipeline_step_action(workflow, state: dict, step: dict, vaspkit_bin: str, enabled: bool) -> None:
+    step_key = step["key"]
+    if step.get("candidate"):
+        show_clean_pipeline_candidate(workflow.root_dir, state, step)
+    show_clean_pipeline_logs_and_summary(workflow, state, step)
+
+    if step_key == "cif_105":
+        element_order = st.text_input(tr("adsorption_wizard.element_order_optional"), key=f"pipeline_105_elements_{workflow.workflow_id}")
+        cif = st.file_uploader(tr("adsorption_wizard.clean.upload_cif"), type=["cif"], key=f"pipeline_cif_{workflow.workflow_id}")
+        if st.button(tr("adsorption_wizard.clean_pipeline.run_step"), disabled=(not enabled or cif is None), key=f"pipeline_run_105_{workflow.workflow_id}"):
+            try:
+                workdir = workflow.root_dir / "structure"
+                workdir.mkdir(parents=True, exist_ok=True)
+                cif_path = workdir / Path(cif.name).name
+                cif_path.write_bytes(cif.getvalue())
+                run_and_record_clean_pipeline_step(
+                    workflow,
+                    state,
+                    step_key,
+                    vaspkit_bin,
+                    build_105_inputs(cif_path.name, element_order),
+                    "105",
+                    "POSCAR",
+                    "POSCAR_105.vasp",
+                    {"cif_filename": cif_path.name, "element_order": element_order.strip()},
+                    sync_current_clean=False,
+                )
+            except Exception as exc:
+                st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+        return
+
+    if step_key == "symmetry_601":
+        if st.button(tr("adsorption_wizard.clean_pipeline.run_step"), disabled=not enabled, key=f"pipeline_run_601_{workflow.workflow_id}"):
+            run_and_record_clean_pipeline_step(workflow, state, step_key, vaspkit_bin, build_601_inputs(), "601", None, None, {}, sync_current_clean=True)
+        return
+
+    if step_key == "primitive_602":
+        if st.button(tr("adsorption_wizard.clean_pipeline.run_step"), disabled=not enabled, key=f"pipeline_run_602_{workflow.workflow_id}"):
+            run_and_record_clean_pipeline_step(workflow, state, step_key, vaspkit_bin, build_602_inputs(), "602", "PRIMCELL.vasp", "PRIMCELL.vasp", {}, sync_current_clean=True)
+        return
+
+    if step_key == "conventional_603":
+        if st.button(tr("adsorption_wizard.clean_pipeline.run_step"), disabled=not enabled, key=f"pipeline_run_603_{workflow.workflow_id}"):
+            run_and_record_clean_pipeline_step(workflow, state, step_key, vaspkit_bin, build_603_inputs(), "603", "CONVCELL.vasp", "CONVCELL.vasp", {}, sync_current_clean=True)
+        return
+
+    if step_key == "vacuum_801":
+        direction = st.selectbox(tr("adsorption_wizard.direction_index"), (1, 2, 3), key=f"pipeline_801_dir_{workflow.workflow_id}")
+        vacuum = st.number_input(tr("adsorption_wizard.vacuum_thickness"), min_value=0.001, value=15.0, key=f"pipeline_801_vac_{workflow.workflow_id}")
+        if st.button(tr("adsorption_wizard.clean_pipeline.run_step"), disabled=not enabled, key=f"pipeline_run_801_{workflow.workflow_id}"):
+            try:
+                run_and_record_clean_pipeline_step(
+                    workflow,
+                    state,
+                    step_key,
+                    vaspkit_bin,
+                    build_801_inputs(direction, vacuum),
+                    "801",
+                    "POSCAR_REV.vasp",
+                    "POSCAR_REV.vasp",
+                    {"direction_index": direction, "vacuum_thickness": vacuum},
+                    sync_current_clean=True,
+                )
+            except Exception as exc:
+                st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+        return
+
+    if step_key == "slab_803":
+        st.warning(tr("adsorption_wizard.structure_editor.slab_warning"))
+        h = st.number_input(tr("adsorption_wizard.h_index"), value=1, step=1, key=f"pipeline_803_h_{workflow.workflow_id}")
+        k = st.number_input(tr("adsorption_wizard.k_index"), value=1, step=1, key=f"pipeline_803_k_{workflow.workflow_id}")
+        l = st.number_input(tr("adsorption_wizard.l_index"), value=0, step=1, key=f"pipeline_803_l_{workflow.workflow_id}")
+        layer = st.text_input(tr("adsorption_wizard.layer_text"), placeholder=tr("adsorption_wizard.layer_placeholder"), key=f"pipeline_803_layer_{workflow.workflow_id}")
+        shift = st.number_input(tr("adsorption_wizard.shift_value"), value=0.0, key=f"pipeline_803_shift_{workflow.workflow_id}")
+        vacuum = st.number_input(tr("adsorption_wizard.vacuum_thickness"), min_value=0.001, value=15.0, key=f"pipeline_803_vac_{workflow.workflow_id}")
+        if st.button(tr("adsorption_wizard.clean_pipeline.run_step"), disabled=not enabled, key=f"pipeline_run_803_{workflow.workflow_id}"):
+            try:
+                output_name = expected_803_output_name(h, k, l)
+                run_and_record_clean_pipeline_step(
+                    workflow,
+                    state,
+                    step_key,
+                    vaspkit_bin,
+                    build_803_inputs(h, k, l, layer, shift, vacuum),
+                    "803",
+                    output_name,
+                    output_name,
+                    {"h": h, "k": k, "l": l, "layer_text": layer, "shift_value": shift, "vacuum_thickness": vacuum},
+                    sync_current_clean=False,
+                    use_bulk_contcar=True,
+                )
+            except Exception as exc:
+                st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+        return
+
+    if step_key == "supercell_401":
+        a = st.number_input(tr("adsorption_wizard.repeat_a"), min_value=1, value=1, step=1, key=f"pipeline_401_a_{workflow.workflow_id}")
+        b = st.number_input(tr("adsorption_wizard.repeat_b"), min_value=1, value=1, step=1, key=f"pipeline_401_b_{workflow.workflow_id}")
+        c = st.number_input(tr("adsorption_wizard.repeat_c"), min_value=1, value=1, step=1, key=f"pipeline_401_c_{workflow.workflow_id}")
+        if st.button(tr("adsorption_wizard.clean_pipeline.run_step"), disabled=not enabled, key=f"pipeline_run_401_{workflow.workflow_id}"):
+            try:
+                output_name = expected_401_output_name(a, b, c)
+                run_and_record_clean_pipeline_step(
+                    workflow,
+                    state,
+                    step_key,
+                    vaspkit_bin,
+                    build_401_inputs(a, b, c),
+                    "401",
+                    output_name,
+                    output_name,
+                    {"repeat_a": a, "repeat_b": b, "repeat_c": c},
+                    sync_current_clean=True,
+                )
+            except Exception as exc:
+                st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+        return
+
+    if step_key == "fix_atoms_402":
+        st.warning(tr("adsorption_wizard.structure_editor.fix_atoms_warning"))
+        st.caption(tr("adsorption_wizard.structure_editor.experimental"))
+        mode = st.radio(tr("adsorption_wizard.fix_mode"), ("atom_indices", "z_range"), format_func=lambda value: tr(f"adsorption_wizard.fix_mode.{value}"), key=f"pipeline_402_mode_{workflow.workflow_id}")
+        direction = st.selectbox(tr("adsorption_wizard.direction_index"), (1, 2, 3), key=f"pipeline_402_dir_{workflow.workflow_id}")
+        if mode == "atom_indices":
+            indices = st.text_input(tr("adsorption_wizard.atom_indices"), placeholder=tr("adsorption_wizard.atom_indices_placeholder"), key=f"pipeline_402_indices_{workflow.workflow_id}")
+            if st.button(tr("adsorption_wizard.clean_pipeline.run_step"), disabled=not enabled, key=f"pipeline_run_402_indices_{workflow.workflow_id}"):
+                try:
+                    run_and_record_clean_pipeline_step(workflow, state, step_key, vaspkit_bin, build_402_atom_indices_inputs(indices, direction), "402", "POSCAR_FIX", "POSCAR_FIX", {"mode": "atom_indices", "atom_indices": indices, "direction_index": direction}, sync_current_clean=True)
+                except Exception as exc:
+                    st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+        else:
+            z_min = st.number_input(tr("adsorption_wizard.z_min"), value=0.0, key=f"pipeline_402_zmin_{workflow.workflow_id}")
+            z_max = st.number_input(tr("adsorption_wizard.z_max"), value=0.3, key=f"pipeline_402_zmax_{workflow.workflow_id}")
+            if st.button(tr("adsorption_wizard.clean_pipeline.run_step"), disabled=not enabled, key=f"pipeline_run_402_z_{workflow.workflow_id}"):
+                try:
+                    run_and_record_clean_pipeline_step(workflow, state, step_key, vaspkit_bin, build_402_z_range_inputs(z_min, z_max, direction), "402", "POSCAR_FIX", "POSCAR_FIX", {"mode": "z_range", "z_min": z_min, "z_max": z_max, "direction_index": direction}, sync_current_clean=True)
+                except Exception as exc:
+                    st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+
+
+def show_clean_pipeline_candidate(workflow_root: Path, state: dict, step: dict) -> None:
+    candidate_rel = step.get("candidate")
+    if not candidate_rel:
+        return
+    candidate = artifact_path(workflow_root, candidate_rel)
+    show_poscar_summary_block(tr("adsorption_wizard.current_candidate"), candidate, workflow_root)
+    show_safe_download_button(candidate, workflow_root, tr("adsorption_wizard.download.candidate_file"), key=f"download_candidate_{step['key']}_{candidate_rel}")
+    if step.get("produces_candidate") and not step.get("adopted"):
+        if st.button(tr("adsorption_wizard.clean_pipeline.adopt_candidate"), key=f"pipeline_adopt_{step['key']}_{candidate_rel}"):
+            state = adopt_clean_poscar_candidate(workflow_root, state)
+            state = mark_clean_pipeline_candidate_adopted(state, step["key"])
+            save_wizard_state(workflow_root, state)
+            st.success(tr("adsorption_wizard.structure_editor.adopt_success"))
+            st.rerun()
+
+
+def show_clean_pipeline_logs_and_summary(workflow, state: dict, step: dict) -> None:
+    logs = step.get("logs") or {}
+    for label, path_text in logs.items():
+        if path_text:
+            path = Path(path_text)
+            show_safe_download_button(path, workflow.root_dir, tr("adsorption_wizard.download.log_file"), key=f"download_log_{step['key']}_{label}_{path.name}")
+    if step.get("key") == "symmetry_601" and logs.get("stdout"):
+        stdout_path = Path(logs["stdout"])
+        if stdout_path.exists():
+            summary = parse_vaspkit_601_summary(stdout_path.read_text(encoding="utf-8", errors="replace"))
+            show_symmetry_summary_card(workflow, state, summary)
+
+
+def show_step_doc(step_key: str) -> None:
+    doc = get_vaspkit_step_doc(step_key, current_lang())
+    with st.container(border=True):
+        st.markdown(f"**{tr('adsorption_wizard.step_doc.title')}: {doc.title}**")
+        st.write(
+            {
+                tr("adsorption_wizard.step_doc.purpose"): doc.purpose,
+                tr("adsorption_wizard.step_doc.role_in_workflow"): doc.role_in_workflow,
+                tr("adsorption_wizard.step_doc.input_files"): doc.input_files,
+                tr("adsorption_wizard.step_doc.output_files"): doc.output_files,
+                tr("adsorption_wizard.step_doc.when_needed"): doc.when_needed,
+                tr("adsorption_wizard.step_doc.when_skip"): doc.when_skip,
+                tr("adsorption_wizard.step_doc.risks"): doc.risks,
+            }
+        )
+
+
+def show_symmetry_summary_card(workflow, state: dict, summary) -> None:
+    st.markdown(f"**{tr('adsorption_wizard.symmetry.title')}**")
+    st.write(
+        {
+            tr("adsorption_wizard.symmetry.space_group"): none_text(summary.space_group_number),
+            tr("adsorption_wizard.symmetry.international_symbol"): none_text(summary.international_symbol),
+            tr("adsorption_wizard.symmetry.point_group"): none_text(summary.point_group),
+            tr("adsorption_wizard.symmetry.crystal_system"): none_text(summary.crystal_system),
+            tr("adsorption_wizard.symmetry.bravais_lattice"): none_text(summary.bravais_lattice),
+            tr("adsorption_wizard.symmetry.symmetry_operations"): none_text(summary.symmetry_operations),
+            tr("adsorption_wizard.symmetry.lattice_constants"): none_text(_format_tuple(summary.lattice_constants)),
+            tr("adsorption_wizard.symmetry.lattice_angles"): none_text(_format_tuple(summary.lattice_angles)),
+            tr("adsorption_wizard.symmetry.total_atoms"): none_text(summary.total_atoms),
+            tr("adsorption_wizard.symmetry.formula"): none_text(summary.full_formula_unit or summary.formula_unit),
+            tr("adsorption_wizard.symmetry.volume"): none_text(summary.volume),
+            tr("adsorption_wizard.symmetry.density"): none_text(summary.density),
+        }
+    )
+    clean_rel = state.get("artifacts", {}).get("clean_poscar")
+    clean_summary = poscar_summary(artifact_path(workflow.root_dir, clean_rel)) if clean_rel else None
+    adsorbate_name = infer_workflow_adsorbate_name(workflow)
+    recommendations = analyze_porous_symmetry_summary(
+        summary,
+        expected_guest_elements=infer_expected_guest_elements(adsorbate_name),
+        structure_elements=list(clean_summary.element_order) if clean_summary else [],
+        cell_lengths=clean_summary.cell_lengths if clean_summary else summary.lattice_constants,
+        adsorbate_name=adsorbate_name,
+    )
+    for item in recommendations:
+        message = tr(item.message_key, **item.details)
+        if item.severity == "warning":
+            st.warning(message)
+        else:
+            st.info(message)
+
+
+def show_safe_download_button(path: Path, workflow_root: Path, label: str, *, key: str) -> None:
+    try:
+        data = get_downloadable_text_file(path, workflow_root)
+    except PermissionError:
+        st.warning(tr("adsorption_wizard.download.not_allowed_potcar"))
+        return
+    except Exception as exc:
+        st.caption(str(exc))
+        return
+    st.download_button(label, data=data, file_name=Path(path).name, key=key)
+
+
+def infer_workflow_adsorbate_name(workflow) -> str:
+    match = re.match(r"ads_\d{8}_\d{6}_(.+)", workflow.workflow_id)
+    if match:
+        return match.group(1).replace("_", "")
+    return workflow.name or ""
+
+
+def _format_tuple(values) -> str | None:
+    if not values:
+        return None
+    return " / ".join(f"{value:.3f}" if isinstance(value, float) else str(value) for value in values)
+
+
+def run_and_record_clean_pipeline_step(
+    workflow,
+    state: dict,
+    step_key: str,
+    vaspkit_bin: str,
+    inputs: list[str],
+    step_name: str,
+    expected_output: str | None,
+    candidate_name: str | None,
+    parameters: dict,
+    *,
+    sync_current_clean: bool,
+    use_bulk_contcar: bool = False,
+) -> None:
+    structure_dir = workflow.root_dir / "structure"
+    structure_dir.mkdir(parents=True, exist_ok=True)
+    if use_bulk_contcar:
+        contcar = workflow.root_dir / "jobs" / "bulk_relax" / "run" / "CONTCAR"
+        if not contcar.exists() or contcar.stat().st_size == 0:
+            st.error(tr("adsorption_wizard.clean_pipeline.contcar_required_for_slab"))
+            return
+        shutil.copy2(contcar, structure_dir / "POSCAR")
+    elif sync_current_clean:
+        sync_clean_poscar_to_structure(workflow.root_dir, state)
+    result = run_vaspkit_structure_step(vaspkit_bin, inputs, structure_dir, step_name, expected_output)
+    logs = {"stdout": str(result.stdout_path), "stderr": str(result.stderr_path)}
+    if not result.ok:
+        state = mark_clean_pipeline_step_failed(state, step_key, errors=result.errors, parameters=parameters, logs=logs)
+        save_wizard_state(workflow.root_dir, state)
+        show_structure_edit_failure(result)
+        return
+    if result.output_path is not None and candidate_name:
+        state = save_candidate_file(
+            workflow.root_dir,
+            state,
+            role="clean",
+            source_path=result.output_path,
+            candidate_name=candidate_name,
+            source_step=step_name,
+            parameters=parameters,
+        )
+        candidate_rel = state.get("candidates", {}).get("clean")
+        state = mark_clean_pipeline_step_done(state, step_key, candidate=candidate_rel, adopted=False, parameters=parameters, logs=logs)
+    else:
+        state = mark_clean_pipeline_step_done(state, step_key, adopted=True, parameters=parameters, logs=logs)
+    save_wizard_state(workflow.root_dir, state)
+    show_structure_edit_result(result)
 
 
 def show_clean_poscar_candidate(workflow_root: Path, state: dict) -> None:

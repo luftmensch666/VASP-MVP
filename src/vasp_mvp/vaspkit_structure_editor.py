@@ -25,6 +25,18 @@ def build_105_inputs(cif_filename: str, element_order: str = "") -> list[str]:
     return ["105", filename, element_order.strip()]
 
 
+def build_601_inputs() -> list[str]:
+    return ["601"]
+
+
+def build_602_inputs() -> list[str]:
+    return ["602"]
+
+
+def build_603_inputs() -> list[str]:
+    return ["603"]
+
+
 def build_801_inputs(direction_index: int | str, vacuum_thickness: float | str) -> list[str]:
     direction = validate_direction_index(direction_index)
     vacuum = validate_positive_float(vacuum_thickness, "vacuum_thickness")
@@ -173,7 +185,7 @@ def run_vaspkit_structure_step(
     inputs: list[str],
     cwd: Path,
     step_name: str,
-    expected_output: str,
+    expected_output: str | None,
     timeout: int = 120,
 ) -> StructureEditResult:
     """运行单个 VASPKIT 结构准备步骤。
@@ -214,16 +226,16 @@ def run_vaspkit_structure_step(
             return_code=None,
             errors=[f"VASPKIT timed out after {timeout} seconds"],
         )
-    output_path = workdir / expected_output
+    output_path = workdir / expected_output if expected_output else None
     errors: list[str] = []
     if return_code != 0:
         errors.append(f"VASPKIT exited with return code {return_code}")
-    if not output_path.exists() or output_path.stat().st_size == 0:
+    if output_path is not None and (not output_path.exists() or output_path.stat().st_size == 0):
         errors.append(f"Expected output file was not generated: {expected_output}")
     return StructureEditResult(
         ok=not errors,
         step_name=step_name,
-        output_path=output_path if output_path.exists() else None,
+        output_path=output_path if output_path is not None and output_path.exists() else None,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
         return_code=return_code,

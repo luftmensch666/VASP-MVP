@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+import ast
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -12,7 +13,10 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from vasp_mvp.adsorption_wizard import (
+    RELAX_CALCULATION_TYPES,
+    RELAX_ROLE_LABELS,
     RELAX_ROLES,
+    RELAX_STEP_ORDER,
     WIZARD_STEPS,
     adopt_clean_poscar_candidate,
     adopt_candidate_poscar,
@@ -48,6 +52,26 @@ Direct
 
 
 class AdsorptionWizardTest(unittest.TestCase):
+    def test_relax_role_constants_are_centralized_for_step_4_and_5(self) -> None:
+        self.assertEqual(RELAX_ROLES, ("clean_relax", "molecule_relax", "adsorbed_relax"))
+        for role in RELAX_ROLES:
+            self.assertIn(role, RELAX_ROLE_LABELS)
+            self.assertIn(role, RELAX_STEP_ORDER)
+            self.assertIn(role, RELAX_CALCULATION_TYPES)
+        self.assertEqual([RELAX_STEP_ORDER[role] for role in RELAX_ROLES], [1, 2, 3])
+        self.assertEqual(RELAX_CALCULATION_TYPES["molecule_relax"], "molecule_relax")
+
+    def test_app_imports_relax_roles_for_wizard_ui(self) -> None:
+        app_path = ROOT / "app.py"
+        tree = ast.parse(app_path.read_text(encoding="utf-8"))
+        imported_from_wizard: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "vasp_mvp.adsorption_wizard":
+                imported_from_wizard.update(alias.name for alias in node.names)
+
+        self.assertIn("RELAX_ROLES", imported_from_wizard)
+        self.assertIn("RELAX_STEP_ORDER", imported_from_wizard)
+
     def test_state_paths_are_relative_and_candidate_adoption_updates_clean_artifact(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "workflow"

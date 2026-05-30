@@ -8,7 +8,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from .adsorption_wizard import RELAX_ROLES, artifact_path, load_wizard_state, save_wizard_state
+from .adsorption_wizard import (
+    RELAX_CALCULATION_TYPES,
+    RELAX_ROLES,
+    RELAX_STEP_ORDER,
+    artifact_path,
+    load_wizard_state,
+    save_wizard_state,
+)
 from .input_set_validation import (
     ValidationResult,
     parse_incar_tags,
@@ -28,7 +35,6 @@ RELAX_SOURCE_ARTIFACTS = {
     "molecule_relax": "molecule_poscar",
     "adsorbed_relax": "adsorbed_poscar",
 }
-RELAX_STEP_ORDER = {"clean_relax": 1, "molecule_relax": 2, "adsorbed_relax": 3}
 
 
 @dataclass(frozen=True)
@@ -417,7 +423,7 @@ def create_relax_jobs_from_inputs(
         job = create_job(
             db_path,
             job_id=job_id,
-            calculation_type="molecule_relax" if role == "molecule_relax" else "relax",
+            calculation_type=RELAX_CALCULATION_TYPES[role],
             status="committed",
             run_dir=run_dir,
             input_set_id=None,
