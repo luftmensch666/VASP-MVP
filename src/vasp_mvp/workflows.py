@@ -20,6 +20,12 @@ WORKFLOW_ROLES = {
     "dos",
     "bader",
     "primary",
+    "clean_relax",
+    "molecule_relax",
+    "adsorbed_relax",
+    "clean_static",
+    "molecule_static",
+    "adsorbed_static",
 }
 
 

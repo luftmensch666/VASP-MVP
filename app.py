@@ -28,6 +28,19 @@ from vasp_mvp.adsorption_visualization import (
     build_total_energy_chart_data,
     format_energy as format_visual_energy,
 )
+from vasp_mvp.adsorption_wizard import (
+    WIZARD_STEPS,
+    adopt_clean_poscar_candidate,
+    artifact_path,
+    can_use_structure_edit_step,
+    load_wizard_state,
+    poscar_summary,
+    require_relax_contcars,
+    save_candidate_file,
+    save_wizard_state,
+    step_status_rows,
+    sync_clean_poscar_to_structure,
+)
 from vasp_mvp.adsorption_workflow import create_adsorption_workflow
 from vasp_mvp.config import load_app_config, load_potcar_config
 from vasp_mvp.data_management import (
@@ -59,7 +72,7 @@ from vasp_mvp.input_sets import (
     update_input_set_status,
 )
 from vasp_mvp.input_set_validation import parse_potcar_summary, validate_input_set
-from vasp_mvp.method_advisor import generate_method_description
+from vasp_mvp.method_advisor import MethodDescription, generate_method_description
 from vasp_mvp.models import InputSet, TaskDraft, TaskRecord, TaskRequest
 from vasp_mvp.jobs import get_job_metrics, list_jobs
 from vasp_mvp.parser import parse_metrics
@@ -70,6 +83,17 @@ from vasp_mvp.security import safe_task_id, task_dir
 from vasp_mvp.structure_io import read_structure_upload
 from vasp_mvp.vaspkit_options import get_vaspkit_section, validate_vaspkit_values
 from vasp_mvp.vaspkit_runner import VaspkitRequest, VaspkitResult, generate_vasp_inputs_with_vaspkit, sha256_file, summarize_potcar
+from vasp_mvp.vaspkit_structure_editor import (
+    build_105_inputs,
+    build_401_inputs,
+    build_801_inputs,
+    build_803_inputs,
+    build_402_atom_indices_inputs,
+    build_402_z_range_inputs,
+    expected_401_output_name,
+    expected_803_output_name,
+    run_vaspkit_structure_step,
+)
 from vasp_mvp.workflow_runner import (
     get_workflow_job_process_state,
     get_workflow_job_log_paths,
@@ -78,7 +102,7 @@ from vasp_mvp.workflow_runner import (
     stop_workflow_job,
     tail_workflow_job_file,
 )
-from vasp_mvp.workflows import list_jobs_for_workflow, list_workflows
+from vasp_mvp.workflows import create_workflow, list_jobs_for_workflow, list_workflows
 
 
 TASK_TYPES = ("relax", "static", "molecule", "adsorption")
@@ -1536,6 +1560,483 @@ def show_delete_result(result, title_key: str) -> None:
         st.error("\n".join(result.errors))
 
 def show_adsorption_workflow_page(config, db_file: Path) -> None:
+    show_adsorption_wizard_page(config, db_file)
+
+
+def show_adsorption_wizard_page(config, db_file: Path) -> None:
+    st.subheader(tr("adsorption_wizard.title"))
+    show_create_adsorption_wizard_form(config, db_file)
+    st.divider()
+    workflows = list_workflows(db_file, workflow_type="adsorption")
+    if not workflows:
+        st.info(tr("adsorption.workflow.no_records"))
+        return
+    selected = st.selectbox(
+        tr("adsorption.workflow.select"),
+        workflows,
+        format_func=lambda workflow: f"{workflow.name} | {workflow.workflow_id} | {workflow_status_label(workflow.status)}",
+        key="adsorption_wizard_selected_workflow",
+    )
+    st.session_state["selected_adsorption_workflow_id"] = selected.workflow_id
+    show_adsorption_wizard_detail(config, db_file, selected)
+
+
+def show_create_adsorption_wizard_form(config, db_file: Path) -> None:
+    with st.expander(tr("adsorption_wizard.create_workflow"), expanded=False):
+        workflow_name = st.text_input(tr("adsorption.workflow.name"), key="wizard_workflow_name")
+        adsorbate_name = st.text_input(
+            tr("adsorption.workflow.adsorbate_name"),
+            placeholder=tr("adsorption.workflow.adsorbate_placeholder"),
+            key="wizard_adsorbate_name",
+        )
+        method_family = st.selectbox(
+            tr("adsorption.workflow.method_family"),
+            ADSORPTION_METHOD_FAMILIES,
+            format_func=lambda value: adsorption_choice_label("adsorption.method_family", value),
+            key="wizard_method_family",
+        )
+        functional = st.selectbox(
+            tr("adsorption.workflow.functional"),
+            ADSORPTION_FUNCTIONALS,
+            format_func=lambda value: adsorption_choice_label("adsorption.functional", value),
+            key="wizard_functional",
+        )
+        description = generate_method_description(
+            method_family=method_family,
+            functional=functional,
+            system_type="adsorption",
+            adsorbate_name=adsorbate_name,
+        )
+        st.markdown(f"**{tr('method_advisor.generated_description')}**")
+        st.info(method_description_text(description))
+        notes_key = "wizard_method_notes"
+        if notes_key not in st.session_state:
+            st.session_state[notes_key] = method_description_text(description)
+        if st.button(tr("method_advisor.regenerate"), key="wizard_regenerate_method_notes"):
+            st.session_state[notes_key] = method_description_text(description)
+            st.rerun()
+        method_notes = st.text_area(tr("adsorption.workflow.method_notes"), key=notes_key)
+        notes = st.text_area(tr("adsorption.workflow.notes"), key="wizard_notes")
+        if st.button(tr("button.create_adsorption_workflow"), type="primary", key="wizard_create_workflow"):
+            normalized_name = workflow_name.strip()
+            if not normalized_name:
+                st.error(tr("workflow.name_required"))
+                return
+            if workflow_name_exists(db_file, normalized_name):
+                st.error(tr("workflow.name_duplicate"))
+                return
+            workflow_id = new_adsorption_workflow_id(adsorbate_name or normalized_name)
+            root_dir = Path(config.workspace) / "workflows" / workflow_id
+            try:
+                method_notes_payload = json.dumps(
+                    {
+                        "zh": method_notes if current_lang() == "zh" else description.zh,
+                        "en": method_notes if current_lang() == "en" else description.en,
+                    },
+                    ensure_ascii=False,
+                )
+                workflow = create_workflow(
+                    db_file,
+                    workflow_id=workflow_id,
+                    workflow_type="adsorption",
+                    name=normalized_name,
+                    root_dir=root_dir,
+                    status="draft",
+                    method_family=method_family,
+                    functional=functional,
+                    method_notes=method_notes_payload,
+                    notes=notes.strip(),
+                )
+                state = load_wizard_state(workflow.root_dir, workflow.workflow_id)
+                save_wizard_state(workflow.root_dir, state)
+            except Exception as exc:
+                st.error(tr("error.adsorption_workflow_create_failed", error=str(exc)))
+                return
+            st.session_state["selected_adsorption_workflow_id"] = workflow.workflow_id
+            st.success(tr("success.adsorption_workflow_created", workflow_id=workflow.workflow_id))
+            st.rerun()
+
+
+def show_adsorption_wizard_detail(config, db_file: Path, workflow) -> None:
+    state = load_wizard_state(workflow.root_dir, workflow.workflow_id)
+    st.markdown(f"**{workflow.name}**")
+    st.caption(f"{workflow.workflow_id} | {workflow.root_dir}")
+    show_wizard_status_table(workflow.root_dir, state)
+    step = st.radio(
+        tr("adsorption_wizard.step_navigation"),
+        WIZARD_STEPS,
+        format_func=lambda value: tr(f"adsorption_wizard.step.{value}"),
+        horizontal=True,
+        key=f"wizard_step_{workflow.workflow_id}",
+    )
+    if step == "clean_structure":
+        show_wizard_step_clean_structure(config, workflow, state)
+    elif step == "adsorbed_structure":
+        show_wizard_step_adsorbed_structure(workflow, state)
+    elif step == "molecule_reference":
+        show_wizard_step_molecule_reference(workflow, state)
+    elif step == "generate_static_inputs":
+        ok, missing = require_relax_contcars(workflow.root_dir)
+        if ok:
+            st.info(tr("adsorption_wizard.step_not_implemented_10a"))
+        else:
+            st.warning(tr("adsorption_wizard.contcar_missing", files=", ".join(missing)))
+    else:
+        st.info(tr("adsorption_wizard.step_not_implemented_10a"))
+
+
+def show_wizard_status_table(workflow_root: Path, state: dict) -> None:
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    tr("adsorption_wizard.step_number"): row["step_number"],
+                    tr("adsorption_wizard.step_name"): tr(f"adsorption_wizard.step.{row['step']}"),
+                    tr("table.status"): tr(f"adsorption_wizard.status.{row['status']}"),
+                    tr("adsorption_wizard.required_artifact"): row["required_artifact"],
+                    tr("table.exists"): bool_label(row["artifact_exists"]),
+                }
+                for row in step_status_rows(workflow_root, state)
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def show_wizard_step_clean_structure(config, workflow, state: dict) -> None:
+    st.markdown(f"**{tr('adsorption_wizard.step.clean_structure')}**")
+    source_type = st.selectbox(
+        tr("adsorption_wizard.source_type.label"),
+        ("already_slab", "porous_or_mof", "bulk_surface"),
+        format_func=lambda value: tr(f"adsorption_wizard.source_type.{value}"),
+        key=f"source_type_{workflow.workflow_id}",
+    )
+    state["source_model_type"] = source_type
+    save_wizard_state(workflow.root_dir, state)
+    st.info(tr(f"adsorption_wizard.source_type.{source_type}.help"))
+    vaspkit_bin = st.text_input(tr("vaspkit.bin.label"), "vaspkit", key=f"wizard_vaspkit_bin_{workflow.workflow_id}")
+    show_current_clean_poscar(workflow.root_dir, state)
+    show_clean_poscar_candidate(workflow.root_dir, state)
+
+    tabs = st.tabs(
+        [
+            tr("adsorption_wizard.clean.upload_poscar"),
+            tr("adsorption_wizard.clean.cif_105"),
+            tr("adsorption_wizard.clean.optional_steps"),
+        ]
+    )
+    with tabs[0]:
+        uploaded = st.file_uploader(
+            tr("adsorption_wizard.clean.upload_poscar"),
+            key=f"clean_poscar_upload_{workflow.workflow_id}",
+        )
+        if uploaded is not None and st.button(tr("adsorption_wizard.save_candidate"), key=f"save_clean_upload_{workflow.workflow_id}"):
+            tmp = workflow.root_dir / "artifacts" / "clean" / "candidates" / Path(uploaded.name).name
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes(uploaded.getvalue())
+            state = save_candidate_file(
+                workflow.root_dir,
+                state,
+                role="clean",
+                source_path=tmp,
+                candidate_name="uploaded_clean_POSCAR",
+                source_step="upload",
+                parameters={"filename": Path(uploaded.name).name},
+            )
+            st.success(tr("adsorption_wizard.candidate_saved"))
+            st.rerun()
+    with tabs[1]:
+        element_order = st.text_input(tr("adsorption_wizard.element_order_optional"), key=f"wizard_105_elements_{workflow.workflow_id}")
+        cif = st.file_uploader(tr("adsorption_wizard.clean.upload_cif"), type=["cif"], key=f"wizard_cif_{workflow.workflow_id}")
+        if st.button(tr("adsorption_wizard.structure_editor.run_105"), disabled=cif is None, key=f"wizard_run_105_{workflow.workflow_id}"):
+            try:
+                workdir = workflow.root_dir / "structure"
+                workdir.mkdir(parents=True, exist_ok=True)
+                cif_path = workdir / Path(cif.name).name
+                cif_path.write_bytes(cif.getvalue())
+                result = run_vaspkit_structure_step(
+                    vaspkit_bin,
+                    build_105_inputs(cif_path.name, element_order),
+                    workdir,
+                    "105",
+                    "POSCAR",
+                )
+                if not result.ok:
+                    show_structure_edit_failure(result)
+                else:
+                    save_candidate_file(
+                        workflow.root_dir,
+                        state,
+                        role="clean",
+                        source_path=result.output_path,
+                        candidate_name="POSCAR_105.vasp",
+                        source_step="105",
+                        parameters={"cif_filename": cif_path.name, "element_order": element_order.strip()},
+                    )
+                    st.success(tr("adsorption_wizard.structure_editor.candidate_created"))
+                    st.rerun()
+            except Exception as exc:
+                st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+    with tabs[2]:
+        show_structure_edit_forms(workflow, state, vaspkit_bin)
+
+
+def show_current_clean_poscar(workflow_root: Path, state: dict) -> None:
+    clean_rel = state.get("artifacts", {}).get("clean_poscar")
+    if not clean_rel:
+        st.warning(tr("adsorption_wizard.clean_poscar_missing"))
+        return
+    show_poscar_summary_block(tr("adsorption_wizard.current_clean_poscar"), artifact_path(workflow_root, clean_rel), workflow_root)
+
+
+def show_clean_poscar_candidate(workflow_root: Path, state: dict) -> None:
+    candidate_rel = state.get("candidates", {}).get("clean")
+    if not candidate_rel:
+        return
+    candidate = artifact_path(workflow_root, candidate_rel)
+    show_poscar_summary_block(tr("adsorption_wizard.current_candidate"), candidate, workflow_root)
+    if st.button(tr("adsorption_wizard.structure_editor.adopt_candidate"), key=f"adopt_clean_{candidate_rel}"):
+        adopt_clean_poscar_candidate(workflow_root, state)
+        st.success(tr("adsorption_wizard.structure_editor.adopt_success"))
+        st.rerun()
+
+
+def show_structure_edit_forms(workflow, state: dict, vaspkit_bin: str) -> None:
+    enabled = can_use_structure_edit_step(workflow.root_dir, state)
+    if not enabled:
+        st.warning(tr("adsorption_wizard.structure_editor.no_clean_poscar"))
+    st.caption(tr("adsorption_wizard.structure_edit_real_call_10b"))
+    with st.expander(tr("adsorption_wizard.vacuum_801")):
+        direction = st.selectbox(tr("adsorption_wizard.direction_index"), (1, 2, 3), key=f"801_dir_{workflow.workflow_id}")
+        vacuum = st.number_input(tr("adsorption_wizard.vacuum_thickness"), min_value=0.001, value=15.0, key=f"801_vac_{workflow.workflow_id}")
+        if st.button(tr("adsorption_wizard.structure_editor.run_801"), disabled=not enabled, key=f"801_run_{workflow.workflow_id}"):
+            try:
+                result = run_clean_structure_step(
+                    workflow,
+                    state,
+                    vaspkit_bin,
+                    "801",
+                    build_801_inputs(direction, vacuum),
+                    "POSCAR_REV.vasp",
+                    "POSCAR_REV.vasp",
+                    {"direction_index": direction, "vacuum_thickness": vacuum},
+                )
+                show_structure_edit_result(result)
+            except Exception as exc:
+                st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+    with st.expander(tr("adsorption_wizard.slab_803")):
+        st.warning(tr("adsorption_wizard.structure_editor.slab_warning"))
+        h = st.number_input(tr("adsorption_wizard.h_index"), value=1, step=1, key=f"803_h_{workflow.workflow_id}")
+        k = st.number_input(tr("adsorption_wizard.k_index"), value=1, step=1, key=f"803_k_{workflow.workflow_id}")
+        l = st.number_input(tr("adsorption_wizard.l_index"), value=0, step=1, key=f"803_l_{workflow.workflow_id}")
+        layer = st.text_input(tr("adsorption_wizard.layer_text"), placeholder=tr("adsorption_wizard.layer_placeholder"), key=f"803_layer_{workflow.workflow_id}")
+        shift = st.number_input(tr("adsorption_wizard.shift_value"), value=0.0, key=f"803_shift_{workflow.workflow_id}")
+        vacuum = st.number_input(tr("adsorption_wizard.vacuum_thickness"), min_value=0.001, value=15.0, key=f"803_vac_{workflow.workflow_id}")
+        if st.button(tr("adsorption_wizard.structure_editor.run_803"), disabled=not enabled, key=f"803_run_{workflow.workflow_id}"):
+            try:
+                output_name = expected_803_output_name(h, k, l)
+                result = run_clean_structure_step(
+                    workflow,
+                    state,
+                    vaspkit_bin,
+                    "803",
+                    build_803_inputs(h, k, l, layer, shift, vacuum),
+                    output_name,
+                    output_name,
+                    {"h": h, "k": k, "l": l, "layer_text": layer, "shift_value": shift, "vacuum_thickness": vacuum},
+                )
+                show_structure_edit_result(result)
+            except Exception as exc:
+                st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+    with st.expander(tr("adsorption_wizard.supercell_401")):
+        a = st.number_input(tr("adsorption_wizard.repeat_a"), min_value=1, value=1, step=1, key=f"401_a_{workflow.workflow_id}")
+        b = st.number_input(tr("adsorption_wizard.repeat_b"), min_value=1, value=1, step=1, key=f"401_b_{workflow.workflow_id}")
+        c = st.number_input(tr("adsorption_wizard.repeat_c"), min_value=1, value=1, step=1, key=f"401_c_{workflow.workflow_id}")
+        if st.button(tr("adsorption_wizard.structure_editor.run_401"), disabled=not enabled, key=f"401_run_{workflow.workflow_id}"):
+            try:
+                output_name = expected_401_output_name(a, b, c)
+                result = run_clean_structure_step(
+                    workflow,
+                    state,
+                    vaspkit_bin,
+                    "401",
+                    build_401_inputs(a, b, c),
+                    output_name,
+                    output_name,
+                    {"repeat_a": a, "repeat_b": b, "repeat_c": c},
+                )
+                show_structure_edit_result(result)
+            except Exception as exc:
+                st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+    with st.expander(tr("adsorption_wizard.fix_402")):
+        st.warning(tr("adsorption_wizard.structure_editor.fix_atoms_warning"))
+        st.caption(tr("adsorption_wizard.structure_editor.experimental"))
+        mode = st.radio(tr("adsorption_wizard.fix_mode"), ("atom_indices", "z_range"), format_func=lambda value: tr(f"adsorption_wizard.fix_mode.{value}"), key=f"402_mode_{workflow.workflow_id}")
+        direction = st.selectbox(tr("adsorption_wizard.direction_index"), (1, 2, 3), key=f"402_dir_{workflow.workflow_id}")
+        if mode == "atom_indices":
+            indices = st.text_input(tr("adsorption_wizard.atom_indices"), placeholder=tr("adsorption_wizard.atom_indices_placeholder"), key=f"402_indices_{workflow.workflow_id}")
+            if st.button(tr("adsorption_wizard.structure_editor.run_402"), disabled=not enabled, key=f"402_indices_run_{workflow.workflow_id}"):
+                try:
+                    result = run_clean_structure_step(
+                        workflow,
+                        state,
+                        vaspkit_bin,
+                        "402",
+                        build_402_atom_indices_inputs(indices, direction),
+                        "POSCAR_FIX",
+                        "POSCAR_FIX",
+                        {"mode": "atom_indices", "atom_indices": indices, "direction_index": direction},
+                    )
+                    show_structure_edit_result(result)
+                except Exception as exc:
+                    st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+        else:
+            z_min = st.number_input(tr("adsorption_wizard.z_min"), value=0.0, key=f"402_zmin_{workflow.workflow_id}")
+            z_max = st.number_input(tr("adsorption_wizard.z_max"), value=0.3, key=f"402_zmax_{workflow.workflow_id}")
+            if st.button(tr("adsorption_wizard.structure_editor.run_402"), disabled=not enabled, key=f"402_z_run_{workflow.workflow_id}"):
+                try:
+                    result = run_clean_structure_step(
+                        workflow,
+                        state,
+                        vaspkit_bin,
+                        "402",
+                        build_402_z_range_inputs(z_min, z_max, direction),
+                        "POSCAR_FIX",
+                        "POSCAR_FIX",
+                        {"mode": "z_range", "z_min": z_min, "z_max": z_max, "direction_index": direction},
+                    )
+                    show_structure_edit_result(result)
+                except Exception as exc:
+                    st.error(tr("adsorption_wizard.structure_editor.invalid_parameter", error=str(exc)))
+
+
+def run_clean_structure_step(
+    workflow,
+    state: dict,
+    vaspkit_bin: str,
+    step_name: str,
+    inputs: list[str],
+    expected_output: str,
+    candidate_name: str,
+    parameters: dict,
+):
+    sync_clean_poscar_to_structure(workflow.root_dir, state)
+    structure_dir = workflow.root_dir / "structure"
+    result = run_vaspkit_structure_step(
+        vaspkit_bin,
+        inputs,
+        structure_dir,
+        step_name,
+        expected_output,
+    )
+    if result.ok and result.output_path is not None:
+        save_candidate_file(
+            workflow.root_dir,
+            state,
+            role="clean",
+            source_path=result.output_path,
+            candidate_name=candidate_name,
+            source_step=step_name,
+            parameters=parameters,
+        )
+    return result
+
+
+def show_structure_edit_result(result) -> None:
+    if result.ok:
+        st.success(tr("adsorption_wizard.structure_editor.candidate_created"))
+        if result.output_path is not None:
+            st.info(tr("adsorption_wizard.expected_output", filename=result.output_path.name))
+        st.rerun()
+    else:
+        show_structure_edit_failure(result)
+
+
+def show_structure_edit_failure(result) -> None:
+    st.error(tr("adsorption_wizard.structure_editor.vaspkit_failed", step=result.step_name))
+    if result.errors:
+        st.error("; ".join(result.errors))
+    st.info(
+        tr(
+            "adsorption_wizard.structure_editor.check_log",
+            stdout=result.stdout_path,
+            stderr=result.stderr_path,
+        )
+    )
+
+
+def show_wizard_step_adsorbed_structure(workflow, state: dict) -> None:
+    st.markdown(f"**{tr('adsorption_wizard.step.adsorbed_structure')}**")
+    with st.expander(tr("adsorption_wizard.tutorial.vesta_adsorbed")):
+        st.write(tr("adsorption_wizard.tutorial.vesta_adsorbed.body"))
+    uploaded = st.file_uploader(tr("adsorption_wizard.upload_adsorbed_poscar"), key=f"ads_poscar_{workflow.workflow_id}")
+    if uploaded is not None and st.button(tr("button.save"), key=f"save_ads_{workflow.workflow_id}"):
+        path = workflow.root_dir / "artifacts" / "adsorbed" / "POSCAR"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(uploaded.getvalue())
+        state["artifacts"]["adsorbed_poscar"] = "artifacts/adsorbed/POSCAR"
+        save_wizard_state(workflow.root_dir, state)
+        st.success(tr("adsorption_wizard.artifact_saved"))
+        st.rerun()
+    rel = state.get("artifacts", {}).get("adsorbed_poscar")
+    if rel:
+        show_poscar_summary_block(tr("adsorption_wizard.step.adsorbed_structure"), artifact_path(workflow.root_dir, rel), workflow.root_dir)
+
+
+def show_wizard_step_molecule_reference(workflow, state: dict) -> None:
+    st.markdown(f"**{tr('adsorption_wizard.step.molecule_reference')}**")
+    with st.expander(tr("adsorption_wizard.tutorial.molecule_poscar")):
+        st.write(tr("adsorption_wizard.tutorial.molecule_poscar.body"))
+    uploaded = st.file_uploader(tr("adsorption_wizard.upload_molecule_poscar"), key=f"mol_poscar_{workflow.workflow_id}")
+    if uploaded is not None and st.button(tr("button.save"), key=f"save_mol_{workflow.workflow_id}"):
+        path = workflow.root_dir / "artifacts" / "molecule" / "POSCAR"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(uploaded.getvalue())
+        state["artifacts"]["molecule_poscar"] = "artifacts/molecule/POSCAR"
+        save_wizard_state(workflow.root_dir, state)
+        st.success(tr("adsorption_wizard.artifact_saved"))
+        st.rerun()
+    rel = state.get("artifacts", {}).get("molecule_poscar")
+    if rel:
+        show_poscar_summary_block(tr("adsorption_wizard.step.molecule_reference"), artifact_path(workflow.root_dir, rel), workflow.root_dir)
+
+
+def show_poscar_summary_block(title: str, path: Path, workflow_root: Path) -> None:
+    summary = poscar_summary(path)
+    st.markdown(f"**{title}**")
+    st.write(
+        {
+            tr("table.path"): summary.to_dict(workflow_root)["path"],
+            tr("table.exists"): bool_label(summary.exists),
+            tr("table.size_bytes"): summary.size_bytes,
+            tr("table.element_order"): list(summary.element_order),
+            tr("adsorption_wizard.atom_counts"): list(summary.atom_counts),
+            tr("adsorption_wizard.total_atoms"): summary.total_atoms,
+            tr("adsorption_wizard.cell_lengths"): summary.cell_lengths,
+        }
+    )
+    if summary.warnings:
+        st.warning("; ".join(summary.warnings))
+
+
+def method_description_text(description: MethodDescription) -> str:
+    return description.zh if current_lang() == "zh" else description.en
+
+
+def workflow_method_notes_for_lang(raw: str | None) -> str:
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    if isinstance(data, dict):
+        return str(data.get(current_lang()) or data.get("en") or data.get("zh") or "")
+    return raw
+
+
+def show_legacy_adsorption_workflow_page(config, db_file: Path) -> None:
     show_create_adsorption_workflow_form(config, db_file)
     st.divider()
     show_adsorption_workflow_list(db_file)
@@ -1552,11 +2053,11 @@ def show_create_adsorption_workflow_form(config, db_file: Path) -> None:
         st.warning(tr("warning.adsorption_no_usable_input_sets"))
         return
     if "adsorption_method_notes_text" not in st.session_state:
-        st.session_state["adsorption_method_notes_text"] = generate_method_description(
+        st.session_state["adsorption_method_notes_text"] = method_description_text(generate_method_description(
             method_family="DFT",
             functional="PBE",
             system_type="adsorption",
-        )
+        ))
 
     with st.form("create_adsorption_workflow_form"):
         workflow_name = st.text_input(
@@ -1605,12 +2106,12 @@ def show_create_adsorption_workflow_form(config, db_file: Path) -> None:
         submitted = st.form_submit_button(tr("button.create_adsorption_workflow"), type="primary")
 
     if regenerate_method:
-        st.session_state["adsorption_method_notes_text"] = generate_method_description(
+        st.session_state["adsorption_method_notes_text"] = method_description_text(generate_method_description(
             method_family=method_family,
             functional=functional,
             system_type="adsorption",
             adsorbate_name=adsorbate_name,
-        )
+        ))
         st.rerun()
 
     if submitted:
@@ -1700,7 +2201,7 @@ def show_adsorption_workflow_detail(db_file: Path, workflow_id: str) -> None:
             tr("table.root_dir"): str(workflow.root_dir),
             tr("table.method_family"): workflow.method_family,
             tr("table.functional"): workflow.functional,
-            tr("table.method_notes"): workflow.method_notes,
+            tr("table.method_notes"): workflow_method_notes_for_lang(workflow.method_notes),
             tr("table.notes"): workflow.notes,
         }
     )
