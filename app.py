@@ -41,6 +41,13 @@ from vasp_mvp.adsorption_wizard import (
     step_status_rows,
     sync_clean_poscar_to_structure,
 )
+from vasp_mvp.adsorption_wizard_relax import (
+    RELAX_STEP_ORDER,
+    check_relax_source_poscars,
+    check_relax_package_consistency,
+    create_relax_jobs_from_inputs,
+    generate_all_relax_input_packages,
+)
 from vasp_mvp.adsorption_workflow import create_adsorption_workflow
 from vasp_mvp.config import load_app_config, load_potcar_config
 from vasp_mvp.data_management import (
@@ -1675,6 +1682,10 @@ def show_adsorption_wizard_detail(config, db_file: Path, workflow) -> None:
         show_wizard_step_adsorbed_structure(workflow, state)
     elif step == "molecule_reference":
         show_wizard_step_molecule_reference(workflow, state)
+    elif step == "generate_relax_inputs":
+        show_wizard_step_generate_relax_inputs(config, db_file, workflow, state)
+    elif step == "run_relax_jobs":
+        show_wizard_step_run_relax_jobs(db_file, workflow)
     elif step == "generate_static_inputs":
         ok, missing = require_relax_contcars(workflow.root_dir)
         if ok:
@@ -2000,6 +2011,126 @@ def show_wizard_step_molecule_reference(workflow, state: dict) -> None:
     rel = state.get("artifacts", {}).get("molecule_poscar")
     if rel:
         show_poscar_summary_block(tr("adsorption_wizard.step.molecule_reference"), artifact_path(workflow.root_dir, rel), workflow.root_dir)
+
+
+def show_wizard_step_generate_relax_inputs(config, db_file: Path, workflow, state: dict) -> None:
+    st.markdown(f"**{tr('adsorption_wizard.relax_inputs.title')}**")
+    ready, sources, missing = check_relax_source_poscars(workflow.root_dir, state)
+    source_rows = []
+    for role in RELAX_ROLES:
+        rel_path = sources.get(role, "")
+        source_rows.append(
+            {
+                tr("table.role"): tr(f"adsorption_wizard.relax_inputs.{role}"),
+                tr("table.path"): rel_path,
+                tr("table.exists"): bool_label(bool(rel_path) and artifact_path(workflow.root_dir, rel_path).exists()),
+            }
+        )
+    st.dataframe(pd.DataFrame(source_rows), use_container_width=True, hide_index=True)
+    if not ready:
+        st.warning(tr("adsorption_wizard.relax_inputs.source_poscar_missing", roles=", ".join(missing)))
+        return
+
+    st.info(tr("adsorption_wizard.relax_inputs.gamma_only_molecule"))
+    vaspkit_bin = st.text_input(tr("vaspkit.bin.label"), "vaspkit", key=f"relax_vaspkit_bin_{workflow.workflow_id}")
+    incar_key = st.text_input(tr("vaspkit.option.incar_custom_key_string.label"), value="SR", key=f"relax_incar_key_{workflow.workflow_id}")
+    scheme = st.selectbox(
+        tr("vaspkit.option.kmesh_scheme.label"),
+        (1, 2, 3),
+        format_func=lambda value: tr(f"vaspkit.choice.kmesh_scheme.{value}"),
+        key=f"relax_kmesh_scheme_{workflow.workflow_id}",
+    )
+    kmesh_value = st.number_input(tr("vaspkit.option.kmesh_resolved_value.label"), min_value=0.001, value=0.04, format="%.3f", key=f"relax_kmesh_value_{workflow.workflow_id}")
+
+    if st.button(tr("adsorption_wizard.relax_inputs.generate"), type="primary", key=f"generate_relax_inputs_{workflow.workflow_id}"):
+        try:
+            results = generate_all_relax_input_packages(
+                workflow.root_dir,
+                state,
+                vaspkit_bin=vaspkit_bin,
+                incar_key=incar_key,
+                kpoints_scheme=scheme,
+                kmesh_value=kmesh_value,
+            )
+            for result in results:
+                if result.ok:
+                    st.success(tr("adsorption_wizard.relax_inputs.generation_success", role=tr(f"adsorption_wizard.relax_inputs.{result.role}")))
+                else:
+                    st.error(tr("adsorption_wizard.relax_inputs.generation_failed", role=tr(f"adsorption_wizard.relax_inputs.{result.role}"), errors="; ".join(result.errors)))
+            consistency_warnings = check_relax_package_consistency(workflow.root_dir)
+            if consistency_warnings:
+                st.warning("\n".join(consistency_warnings))
+            st.rerun()
+        except Exception as exc:
+            st.error(tr("adsorption_wizard.relax_inputs.generation_failed", role="all", errors=str(exc)))
+
+    state = load_wizard_state(workflow.root_dir, workflow.workflow_id)
+    relax_inputs = state.get("relax_inputs", {})
+    if relax_inputs:
+        st.markdown(f"**{tr('adsorption_wizard.relax_inputs.validation_summary')}**")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        tr("table.role"): tr(f"adsorption_wizard.relax_inputs.{role}"),
+                        tr("table.status"): data.get("status", ""),
+                        tr("table.path"): data.get("input_dir", ""),
+                        tr("table.warning"): "; ".join(data.get("warnings", [])),
+                        tr("error.vaspkit_validation"): "; ".join(data.get("errors", [])),
+                    }
+                    for role, data in relax_inputs.items()
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if st.button(tr("adsorption_wizard.relax_inputs.create_jobs"), key=f"create_relax_jobs_{workflow.workflow_id}"):
+        results = create_relax_jobs_from_inputs(
+            db_file,
+            workflow.workflow_id,
+            workflow.root_dir,
+            mpi_ranks=config.default_mpi_ranks,
+            vasp_bin=config.vasp_bin,
+        )
+        for result in results:
+            if result["status"] == "created":
+                st.success(tr("adsorption_wizard.relax_jobs.created", role=tr(f"adsorption_wizard.relax_inputs.{result['role']}"), job_id=result["job_id"]))
+            elif result["status"] == "exists":
+                st.info(tr("adsorption_wizard.relax_jobs.already_exists", role=tr(f"adsorption_wizard.relax_inputs.{result['role']}")))
+            else:
+                st.error(tr("adsorption_wizard.relax_jobs.create_failed", role=tr(f"adsorption_wizard.relax_inputs.{result['role']}"), errors=", ".join(result.get("errors", []))))
+        st.rerun()
+
+
+def show_wizard_step_run_relax_jobs(db_file: Path, workflow) -> None:
+    st.markdown(f"**{tr('adsorption_wizard.relax_jobs.title')}**")
+    workflow_jobs = list_jobs_for_workflow(db_file, workflow.workflow_id)
+    jobs_by_role = {binding.role: (binding, job) for binding, job in workflow_jobs}
+    for role in RELAX_ROLES:
+        st.markdown(f"**{tr(f'adsorption_wizard.relax_inputs.{role}')}**")
+        if role not in jobs_by_role:
+            st.warning(tr("adsorption_wizard.relax_jobs.no_relax_job"))
+            continue
+        binding, job = jobs_by_role[role]
+        with st.container(border=True):
+            process_state = get_workflow_job_process_state(db_file, job.job_id)
+            contcar = Path(job.run_dir) / "CONTCAR"
+            st.write(
+                {
+                    tr("table.role"): tr(f"adsorption_wizard.relax_inputs.{binding.role}"),
+                    tr("table.step_order"): binding.step_order,
+                    tr("table.job_id"): job.job_id,
+                    tr("table.calculation_type"): calculation_type_label(job.calculation_type),
+                    tr("table.status"): status_label(job.status),
+                    tr("workflow_job.pid"): none_text(job.pid),
+                    tr("workflow_job.process_alive"): bool_label(process_state["process_alive"]),
+                    tr("table.run_dir"): str(job.run_dir),
+                    tr("adsorption_wizard.relax_jobs.contcar_exists"): bool_label(contcar.exists() and contcar.stat().st_size > 0),
+                }
+            )
+            show_workflow_job_controls(db_file, job.job_id)
+            show_workflow_job_logs(db_file, job.job_id)
 
 
 def show_poscar_summary_block(title: str, path: Path, workflow_root: Path) -> None:
